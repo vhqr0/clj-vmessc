@@ -19,8 +19,8 @@
                       [(a/chan 1024 (remove b/empty?))
                        (a/chan 1024 (remove b/empty?))]
                       (let [[ixform oxform] xform-pair]
-                        [(a/chan 1024 (remove b/empty?) ixform (remove b/empty?))
-                         (a/chan 1024 (remove b/empty?) oxform (remove b/empty?))]))]
+                        [(a/chan 1024 (comp (remove b/empty?) ixform (remove b/empty?)))
+                         (a/chan 1024 (comp (remove b/empty?) oxform (remove b/empty?)))]))]
         (a/<! (-> ch-pair (net/connect net-opts)))))))
 
 (defmulti connect
@@ -95,4 +95,4 @@
 
 (defn start-server
   [{:keys [port] :as ctx}]
-  (net/start-server #(handle % ctx) port))
+  (net/tcp-start-server #(handle % ctx) {:port port}))

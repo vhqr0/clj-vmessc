@@ -1,35 +1,18 @@
 (ns vmessc.crypto
   (:require [clj-bytes.core :as b])
   (:import [java.util Date]
-           [java.time Instant]
            [java.util.zip CRC32]
            [java.security MessageDigest]
            [javax.crypto Cipher]
            [javax.crypto.spec SecretKeySpec GCMParameterSpec]
            [org.bouncycastle.crypto.digests SHAKEDigest]))
 
-;;; time
+;;; inst utils
 
-(defn now-sec
-  "Get current unix time stamp in sec."
+(defn now
+  "Get current date inst."
   []
-  (.getTime (Date.)))
-
-(defn now-msec
-  "Get current unix time stamp in msec."
-  []
-  (let [sec (now-sec)]
-    (int (/ sec 1000))))
-
-(defn sec->inst
-  "Convert unix time stamp in sec to inst."
-  [sec]
-  (Date/from (Instant/ofEpochSecond sec)))
-
-(defn msec->inst
-  "Convert unix time stamp in msec to inst."
-  [msec]
-  (Date/from (Instant/ofEpochMilli msec)))
+  (Date.))
 
 ;;; check sum
 
@@ -43,13 +26,17 @@
 (defn fnv1a
   "Get fnv1a check sum in int."
   [b]
-  (let [p 0x01000193
-        m 0xffffffff]
-    (->> (range (alength b))
-         (reduce
-          (fn [r i]
-            (bit-and m (* p (bit-xor r (aget b i)))))
-          0x811c9dc5))))
+  (let [r 0x811c9dc5
+        p 0x01000193
+        m 0xffffffff
+        rf #(-> (bit-xor %1 %2) (* p) (bit-and m))]
+    (->> (seq b) (reduce rf r))))
+
+^:rct/test
+(comment
+  (crc32 (b/of-str "hello")) ; => 907060870
+  (fnv1a (b/of-str "hello")) ; => 1335831723
+  )
 
 ;;; digest
 
@@ -62,59 +49,78 @@
 (defn md5 [b] (digest b "MD5"))
 (defn sha256 [b] (digest b "SHA-256"))
 
-(defprotocol KDF
-  "Abstraction for clonable vmess kdf function."
-  (kdf-clone [this]
-    "Clone kdf object.")
-  (kdf-update! [this b]
-    "Update kdf state, impure.")
-  (kdf-digest! [this b]
-    "Digest, impure."))
+^:rct/test
+(comment
+  (-> (b/of-str "hello") md5 b/hex)
+  ;; => "5d41402abc4b2a76b9719d911017c592"
+  (-> (b/of-str "hello") sha256 b/hex)
+  ;; => "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+  )
 
-(defrecord SHA256KDF [d]
-  KDF
-  (kdf-clone [_]
-    (->SHA256KDF (.clone d)))
-  (kdf-update! [_ b]
+;;;; vmess digest
+
+(defprotocol VmessDigest
+  "Abstraction for clonable vmess digest function."
+  (vd-clone [this]
+    "Clone vmess digest state.")
+  (vd-update! [this b]
+    "Update digest state, impure.")
+  (vd-digest! [this b]
+    "Do digest, impure."))
+
+(defrecord SHA256VmessDigest [d]
+  VmessDigest
+  (vd-clone [_]
+    (->SHA256VmessDigest (.clone d)))
+  (vd-update! [_ b]
     (.update d b))
-  (kdf-digest! [_ b]
+  (vd-digest! [_ b]
     (.digest d b)))
 
-(defrecord RecurKDF [inner outer]
-  KDF
-  (kdf-clone [_]
-    (->RecurKDF (kdf-clone inner) (kdf-clone outer)))
-  (kdf-update! [_ b]
-    (kdf-update! inner b))
-  (kdf-digest! [_ b]
-    (kdf-digest! outer (kdf-digest! inner b))))
+(defrecord RecurVmessDigest [ivd ovd]
+  VmessDigest
+  (vd-clone [_]
+    (->RecurVmessDigest (vd-clone ivd) (vd-clone ovd)))
+  (vd-update! [_ b]
+    (vd-update! ivd b))
+  (vd-digest! [_ b]
+    (vd-digest! ovd (vd-digest! ivd b))))
 
-(defn ->sha256-kdf
-  "Construct sha256 kdf."
+(defn ->sha256-vd
+  "Construct SHA256 vmess digest state."
   []
-  (->SHA256KDF (MessageDigest/getInstance "SHA-256")))
+  (->SHA256VmessDigest (MessageDigest/getInstance "SHA-256")))
 
 (defn hmac-expand-key
-  "Expand hmac key."
+  "Expand key in HMAC format."
   [^bytes k]
-  (assert (<= (b/count k) 64))
-  (let [^bytes ik (-> (byte-array 64) (b/fill! 0x36))
-        ^bytes ok (-> (byte-array 64) (b/fill! 0x5c))]
-    (dotimes [i (alength k)]
-      (let [b (aget k i)]
-        (aset-byte ik i (unchecked-byte (bit-xor b 0x36)))
-        (aset-byte ok i (unchecked-byte (bit-xor b 0x5c)))))
-    [ik ok]))
+  (if (> (b/count k) 64)
+    (throw (ex-info "vmess digest assert key length <= 64" {}))
+    (let [^bytes ik (-> (byte-array 64) (b/fill! 0x36))
+          ^bytes ok (-> (byte-array 64) (b/fill! 0x5c))]
+      (dotimes [i (alength k)]
+        (let [b (aget k i)]
+          (aset-byte ik i (unchecked-byte (bit-xor b 0x36)))
+          (aset-byte ok i (unchecked-byte (bit-xor b 0x5c)))))
+      [ik ok])))
 
-(defn ->recur-kdf
-  "Construct recur kdf, based on a base kdf and label."
-  [kdf ^bytes label]
-  (let [[ik ok] (hmac-expand-key label)
-        id (doto (kdf-clone kdf)
-             (kdf-update! ik))
-        od (doto (kdf-clone kdf)
-             (kdf-update! ok))]
-    (->RecurKDF id od)))
+(defn ->recur-vd
+  "Construct recur vmess digest state,
+  based on a base digest state and key."
+  [vd ^bytes k]
+  (let [[ik ok] (hmac-expand-key k)
+        ivd (doto (vd-clone vd) (vd-update! ik))
+        ovd (doto (vd-clone vd) (vd-update! ok))]
+    (->RecurVmessDigest ivd ovd)))
+
+^:rct/test
+(comment
+  (-> (->sha256-vd)
+      (->recur-vd (b/of-str "hello"))
+      (vd-digest! (b/of-str "world"))
+      b/hex)
+  ;; => "f1ac9702eb5faf23ca291a4dc46deddeee2a78ccdaf0a412bed7714cfffb1cc4"
+  )
 
 ;;; mask generator
 
@@ -129,7 +135,10 @@
         b))))
 
 (comment
-  (def r (shake128-reader (b/of-str "hello"))))
+  (def r (shake128-reader (b/of-str "hello")))
+  (b/hex (r 2)) ; => "8eb4"
+  (b/hex (r 2)) ; => "b6a9"
+  )
 
 ;;; cipher
 

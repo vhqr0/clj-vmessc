@@ -7,12 +7,12 @@
 
 ;;; kdf
 
-(def kdf-base-label
-  "Vmess kdf base label."
+(def kdf-1-label
+  "Vmess kdf first level label."
   "VMess AEAD KDF")
 
-(def kdf-labels
-  "Vmess kdf labels."
+(def kdf-2-labels
+  "Vmess kdf second level labels."
   {:aid "AES Auth ID Encryption"
    :req-len-key "VMess Header AEAD Key_Length"
    :req-len-iv "VMess Header AEAD Nonce_Length"
@@ -23,23 +23,30 @@
    :resp-key "AEAD Resp Header Key"
    :resp-iv "AEAD Resp Header IV"})
 
-(def kdf-base
-  "Vmess base kdf."
-  (-> (crypto/->sha256-kdf)
-      (crypto/->recur-kdf (b/of-str kdf-base-label))))
+(def kdf-1-vd
+  "Vmess kdf first level digest state."
+  (-> (crypto/->sha256-vd)
+      (crypto/->recur-vd (b/of-str kdf-1-label))))
 
-(def kdfs
-  "Vmess kdfs."
-  (->> kdf-labels
+(def kdf-2-vds
+  "Vmess kdf second level digest states."
+  (->> kdf-2-labels
        (map
         (fn [[k l]]
-          [k (crypto/->recur-kdf kdf-base (b/of-str l))]))
+          (let [vd (-> kdf-1-vd (crypto/->recur-vd (b/of-str l)))]
+            [k vd])))
        (into {})))
 
-(defn reduce-kdf
-  "Add more labels to kdf."
-  [kdf & labels]
-  (->> labels (reduce crypto/->recur-kdf kdf)))
+(defn kdf
+  "Vmess kdf digest."
+  [type b & labels]
+  {:pre [(contains? kdf-2-vds type)]}
+  (let [vd (->> labels
+                (reduce
+                 (fn [vd ^bytes label]
+                   (-> vd (crypto/->recur-vd label)))
+                 (get kdf-2-vds type)))]
+    (crypto/vd-digest! vd b)))
 
 ;;; id
 
@@ -56,7 +63,7 @@
   "Construct expanded vmess id from uuid."
   [uuid]
   (let [cmd-key (crypto/md5 (b/concat! (uuid->bytes uuid) (b/of-str vmess-uuid)))
-        auth-key (-> (crypto/kdf-digest! (:aid kdfs) cmd-key) (b/sub! 0 16))]
+        auth-key (-> (crypto/vd-digest! (:aid kdf-2-vds) cmd-key) (b/sub! 0 16))]
     {:uuid uuid :cmd-key cmd-key :auth-key auth-key}))
 
 (comment
@@ -65,7 +72,7 @@
 (defn ->auth-param
   "Construct vmess auth param."
   []
-  {:now (crypto/now-msec) :nonce (b/rand 4)})
+  {:now (-> (crypto/now) inst-ms) :nonce (b/rand 4)})
 
 (def st-aid
   "Struct of vmess auth id."
@@ -74,13 +81,16 @@
    (st/bytes-fixed 4)))
 
 (defn ->eaid
-  "Get vmess eaid."
+  "Construct vmess eaid."
   ([id]
    (->eaid id (->auth-param)))
   ([{:keys [auth-key]} {:keys [now nonce]}]
    (let [aid (st/pack [now nonce] st-aid)
-         c (st/pack (crypto/crc32 aid) st/uint16-be)]
-     (crypto/aes128-ecb-encrypt auth-key (b/concat! aid c)))))
+         crc (-> (crypto/crc32 aid) (st/pack st/uint16-be))]
+     (crypto/aes128-ecb-encrypt auth-key (b/concat! aid crc)))))
+
+(comment
+  (-> (random-uuid) ->id ->eaid))
 
 ;;; param
 
@@ -93,8 +103,8 @@
      :stage :init
      :key key
      :iv iv
-     :rkey (b/sub! (crypto/sha256 key) 0 16)
-     :riv (b/sub! (crypto/sha256 iv) 0 16)
+     :rkey (-> (crypto/sha256 key) (b/sub! 0 16))
+     :riv (-> (crypto/sha256 iv) (b/sub! 0 16))
      :nonce (b/rand 8)
      :verify (rand-int 256)
      :pad (b/rand (rand-int 16))}))
@@ -105,23 +115,27 @@
   (let [r (crypto/shake128-reader b)]
     (repeatedly #(r 2))))
 
-(defn crypt-ivs-seq
+(defn ivs-seq
   "Generate seq of crypt ivs."
   ([iv]
-   (crypt-ivs-seq iv 0))
+   (ivs-seq iv 0))
   ([iv cnt]
    (lazy-seq
     (cons
      (b/concat! (st/pack cnt st/uint16-be) iv)
-     (crypt-ivs-seq iv (inc cnt))))))
+     (ivs-seq iv (inc cnt))))))
 
 (defn ->crypt-state
   "Construct base crypt state."
   [key iv param]
   {:key (crypto/->aes-key key)
-   :crypt-ivs (crypt-ivs-seq (b/sub! iv 2 12))
+   :ivs (ivs-seq (b/sub! iv 2 12))
    :len-masks (len-masks-seq iv)
    :param param})
+
+(comment
+  (->> (len-masks-seq (b/rand 16)) (take 10) (map b/hex))
+  (->> (ivs-seq (b/rand 12)) (take 10) (map b/hex)))
 
 ;;; encrypt
 
@@ -151,7 +165,7 @@
    :host (-> (st/bytes-var :uint8) st/wrap-str)))
 
 (defn ->req
-  "Get vmess request."
+  "Construct vmess request."
   [{:keys [addr iv key verify pad]}]
   (-> {:ver 1
        :iv iv
@@ -169,30 +183,28 @@
 (defmethod advance-encrypt-state :wait-first-frame [state b]
   (let [{:keys [param]} state
         {:keys [id nonce]} param
+        {:keys [cmd-key]} id
         eaid (->eaid id)
         req (->req param)
-        elen (crypto/aes128-gcm-encrypt
-              (b/sub! (crypto/kdf-digest! (-> (:req-len-key kdfs) (reduce-kdf eaid nonce)) (:cmd-key id)) 0 16)
-              (b/sub! (crypto/kdf-digest! (-> (:req-len-iv kdfs) (reduce-kdf eaid nonce)) (:cmd-key id)) 0 12)
-              ;; decrypted req len
-              (st/pack (b/count req) st/uint16-be)
-              eaid)
-        ereq (crypto/aes128-gcm-encrypt
-              (b/sub! (crypto/kdf-digest! (-> (:req-key kdfs) (reduce-kdf eaid nonce)) (:cmd-key id)) 0 16)
-              (b/sub! (crypto/kdf-digest! (-> (:req-iv kdfs) (reduce-kdf eaid nonce)) (:cmd-key id)) 0 12)
-              req
-              eaid)
-        state (assoc state :stage :wait-frame)
-        [eb state] (advance-encrypt-state state b)]
+        len (st/pack (b/count req) st/uint16-be)
+        elen (let [key (-> (kdf :req-len-key cmd-key eaid nonce) (b/sub! 0 16))
+                   iv (-> (kdf :req-len-iv cmd-key eaid nonce) (b/sub! 0 12))]
+               (crypto/aes128-gcm-encrypt key iv len eaid))
+        ereq (let [key (-> (kdf :req-key cmd-key eaid nonce) (b/sub! 0 16))
+                   iv (-> (kdf :req-iv cmd-key eaid nonce) (b/sub! 0 12))]
+               (crypto/aes128-gcm-encrypt key iv req eaid))
+        [eb state] (-> state
+                       (assoc :stage :wait-frame)
+                       (advance-encrypt-state state b))]
     [(b/concat! eaid nonce elen ereq eb) state]))
 
 (defmethod advance-encrypt-state :wait-frame [state b]
-  (let [{:keys [key crypt-ivs len-masks]} state
-        eb (crypto/aes128-gcm-encrypt key (first crypt-ivs) b (b/empty))
+  (let [{:keys [key ivs len-masks]} state
+        eb (crypto/aes128-gcm-encrypt key (first ivs) b (b/empty))
         len (-> (b/count eb) (bit-xor (first len-masks)) (st/pack st/uint16-be))]
     [(b/concat! len eb)
      (-> state
-         (update :crypt-ivs rest)
+         (update :ivs rest)
          (update :len-masks rest))]))
 
 (defn ->encrypt-xform
@@ -205,8 +217,8 @@
         ([result] (rf result))
         ([result input]
          (let [[b state] (advance-encrypt-state @vstate input)]
-             (vreset! vstate state)
-             (rf result b)))))))
+           (vreset! vstate state)
+           (rf result b)))))))
 
 ;;; cryptor
 
@@ -223,19 +235,19 @@
   (fn [state] (:stage state)))
 
 (defmethod advance-decrypt-state :wait-resp-len [state]
-  (let [{:keys [buffer rkey riv]} state]
+  (let [{:keys [buffer param]} state
+        {:keys [rkey riv]} param]
     (if (< (b/count buffer) 18)
       [nil state]
       (let [[elen buffer] (b/split-at! 18 buffer)
-            ;; decrypted req len
-            len (-> (crypto/aes128-gcm-decrypt
-                     (b/sub! (crypto/kdf-digest! (:resp-len-key kdfs) rkey) 0 16)
-                     (b/sub! (crypto/kdf-digest! (:resp-len-iv kdfs) riv) 0 12)
-                     elen
-                     (b/empty))
+            key (-> (kdf :resp-len-key rkey) (b/sub! 0 16))
+            iv (-> (kdf :resp-len-iv riv) (b/sub! 0 12))
+            len (-> (crypto/aes128-gcm-decrypt key iv elen (b/empty))
                     (st/unpack st/uint16-be))]
-        ;; assoc encrypted req len
-        [nil (assoc state :stage :wait-resp :buffer buffer :len (+ len 16))]))))
+        (-> state
+            ;; assoc encrypted req len
+            (assoc :stage :wait-resp :buffer buffer :len (+ len 16))
+            advance-decrypt-state)))))
 
 (def st-resp
   "Struct of vmess response."
@@ -250,14 +262,15 @@
     (if (< (b/count buffer) len)
       [nil state]
       (let [[eresp buffer] (b/split-at! len buffer)
-            resp (-> (crypto/aes128-gcm-decrypt
-                      (b/sub! (crypto/kdf-digest! (:resp-key kdfs) rkey) 0 16)
-                      (b/sub! (crypto/kdf-digest! (:resp-iv kdfs) riv) 0 12)
-                      eresp
-                      (b/empty))
+            key (-> (kdf :resp-key rkey) (b/sub! 0 16))
+            iv (-> (kdf :resp-iv riv) (b/sub! 0 12))
+            resp (-> (crypto/aes128-gcm-decrypt key iv eresp (b/empty))
                      (st/unpack st-resp))]
-        (assert (= verify (:verify resp)))
-        [nil (assoc state :stage :wait-frame-len :buffer buffer)]))))
+        (if-not (= verify (:verify resp))
+          (throw (ex-info "verify vmess resp failed" {}))
+          (-> state
+              (assoc :stage :wait-frame-len :buffer buffer)
+              advance-decrypt-state))))))
 
 (defn decrypt-len
   "Decrypt len, assoc decrypted len in state."
@@ -272,35 +285,30 @@
     (if (< (b/count buffer) 2)
       [nil state]
       (let [[len buffer] (b/split-at! 2 buffer)]
-        [nil (-> state
-                 (assoc :stage :wait-frame :buffer buffer)
-                 (decrypt-len len))]))))
+        (-> state
+            (assoc :stage :wait-frame :buffer buffer)
+            (decrypt-len len)
+            advance-decrypt-state)))))
 
 (defmethod advance-decrypt-state :wait-frame [state]
-  (let [{:keys [key crypt-ivs buffer len]} state]
+  (let [{:keys [key ivs buffer len]} state]
     (if (< (b/count buffer) len)
       [nil state]
       (let [[eb buffer] (b/split-at! len buffer)
-            iv (first crypt-ivs)
+            iv (first ivs)
             b (crypto/aes128-gcm-decrypt key iv eb (b/empty))
-            stage (if (b/empty? b) :closed :wait-frame-len)]
-        [b (-> state
-               (assoc :stage stage :buffer buffer)
-               (update :crypt-ivs rest))]))))
+            stage (if (b/empty? b) :closed :wait-frame-len)
+            [nb state] (-> state
+                           (assoc :stage stage :buffer buffer)
+                           advance-decrypt-state)
+            b (cond-> b
+                (some? nb) (b/concat! nb))]
+        [b state]))))
 
 (defmethod advance-decrypt-state :closed [state]
-  (assert (b/empty? (:buffer state)))
-  [nil state])
-
-(defn advance-decrypt-state-recur
-  "Recursive advance decrypt state."
-  [state b]
-  (let [state (update state :buffer b/concat! b)]
-    (loop [bs [] state state]
-      (let [[b state] (advance-decrypt-state state)]
-        (if (nil? b)
-          [(b/join! bs) state]
-          (recur (conj bs b) state))))))
+  (if-not (b/empty? (:buffer state))
+    (throw (ex-info "invalid data after vmess connection closed" {}))
+    [nil state]))
 
 (defn ->decrypt-xform
   "Construct vmess decrypt trans function for async chan."
@@ -315,9 +323,10 @@
          (assert (= (:stage @vstate) :closed))
          (rf result))
         ([result input]
-         (let [[b state] (advance-decrypt-state-recur state input)]
-             (vreset! vstate state)
-             (rf result b)))))))
+         (let [[b state] (advance-decrypt-state @vstate input)]
+           (vreset! vstate state)
+           (when (some? b)
+             (rf result b))))))))
 
 ;;; connect
 

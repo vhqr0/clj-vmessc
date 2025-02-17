@@ -1,18 +1,13 @@
 (ns vmessc.cli
   (:require [clojure.string :as str]
-            [clojure.core.async :as a]
-            [clojure.java.io :as io]
-            [clj-commons.byte-streams :as bs]
             [vmessc.crypto :as crypto]
-            [vmessc.net :as net]
             vmessc.socks5
             vmessc.vmess))
 
-(defn fetch
+(defn fetch-subs
   ([]
-   (fetch (crypto/now-msec)))
+   (fetch-subs (-> (crypto/now) inst-ms)))
   ([now]
-   (let [url (-> "conf/subs.url" slurp str/trim)]
-     (when-let [resp (a/<!! (net/request url))]
-       (bs/transfer resp (io/file (str "conf/bak/subs.txt." now)))
-       (bs/transfer resp (io/file "conf/subs.txt"))))))
+   (let [subs (-> "conf/subs.url" slurp str/trim slurp)]
+     (-> subs (spit (str "conf/bak/subs.txt." now)))
+     (-> subs (spit "conf/bak/subs.txt")))))

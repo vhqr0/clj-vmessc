@@ -108,35 +108,29 @@
 (defmethod advance :wait-auth-req [state]
   (let [{:keys [buffer]} state]
     (if-let [[_ buffer] (-> buffer (st/unpack st-auth-req))]
-      (let [rep (-> {:ver :socks5 :meth :no-auth} (st/pack st-auth-req))]
-        [rep (assoc state :stage :wait-req :buffer buffer)])
+      (let [b (-> {:ver :socks5 :meth :no-auth} (st/pack st-auth-req))
+            [nb state] (-> state
+                           (assoc :stage :wait-req :buffer buffer)
+                           advance)
+            b (cond-> b
+                (some? nb) (b/concat! nb))]
+        [b state])
       [nil state])))
 
 (defmethod advance :wait-req [state]
   (let [{:keys [buffer]} state]
     (if-let [[{:keys [addr]} buffer] (-> buffer (st/unpack st-req))]
-      (let [rep (-> {:ver :socks5 :res :ok :rsv 0 :addr ["0.0.0.0" 0]} (st/pack st-rep))]
-        [rep (assoc state :stage :connected :buffer buffer :addr addr)])
+      (let [b (-> {:ver :socks5 :res :ok :rsv 0 :addr ["0.0.0.0" 0]} (st/pack st-rep))]
+        [b (assoc state :stage :connected :buffer buffer :addr addr)])
       [nil state])))
 
 (defmethod advance :connected [state]
   [nil state])
 
-(defn advance-recur
-  "Recursive advance socks5 handshake state until advance completed,
-  return bytes to send and new state."
-  [state b]
-  (let [state (update state :buffer b/concat! b)]
-    (loop [bs [] state state]
-      (let [[b state] (advance state)]
-        (if (nil? b)
-          [(b/join! bs) state]
-          (recur (conj bs b) state))))))
-
 (defrecord Socks5HandshakeState [state]
   proto/ProxyHandshakeState
   (-handshake-advance [_ b]
-    (let [[b state] (advance-recur state b)]
+    (let [[b state] (advance state b)]
       [b (->Socks5HandshakeState state)]))
   (-handshake-info [_]
     (when (= (:stage state) :connected)
