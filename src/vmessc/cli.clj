@@ -1,8 +1,10 @@
 (ns vmessc.cli
   (:require [clojure.string :as str]
-            [vmessc.crypto :as crypto]
+            [vmessc.sys :as sys]
             vmessc.socks5
             vmessc.vmess))
+
+;;; sub
 
 (defn sub-paths
   "Get sub file paths."
@@ -12,7 +14,7 @@
 (defn fetch-sub
   "Fetch sub."
   ([]
-   (fetch-sub (-> (crypto/now) inst-ms)))
+   (fetch-sub (-> (sys/now) inst-ms)))
   ([now]
    (let [s (-> "conf/sub.url" slurp str/trim slurp)]
      (doseq [path (sub-paths now)]

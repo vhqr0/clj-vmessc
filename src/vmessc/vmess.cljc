@@ -2,6 +2,7 @@
   (:require [clj-bytes.core :as b]
             [clj-bytes.struct :as st]
             [clojure.string :as str]
+            [vmessc.sys :as sys]
             [vmessc.crypto :as crypto]
             [vmessc.protocols :as proto]))
 
@@ -72,7 +73,7 @@
 (defn ->auth-param
   "Construct vmess auth param."
   []
-  {:now (-> (crypto/now) inst-ms) :nonce (b/rand 4)})
+  {:now (-> (sys/now) inst-ms) :nonce (b/rand 4)})
 
 (def st-aid
   "Struct of vmess auth id."

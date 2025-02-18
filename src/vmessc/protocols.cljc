@@ -1,5 +1,7 @@
 (ns vmessc.protocols)
 
+;;; proxy
+
 (defprotocol ProxyHandshakeState
   (-handshake-advance [this b]
     "Return bytes to send and new state.")

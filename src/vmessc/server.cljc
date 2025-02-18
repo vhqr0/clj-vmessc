@@ -2,7 +2,7 @@
   (:require [clojure.string :as str]
             [clojure.core.async :as a]
             [clj-bytes.core :as b]
-            [vmessc.crypto :as crypto]
+            [vmessc.sys :as sys]
             [vmessc.net :as net]
             [vmessc.protocols :as proto]))
 
@@ -83,7 +83,7 @@
   (fn [_msg opts] (:type opts)))
 
 (defmethod log :console [msg _opts]
-  (let [now (-> (crypto/now) crypto/inst-fmt)]
+  (let [now (-> (sys/now) sys/inst-fmt)]
     (-> msg (assoc :now now) prn)))
 
 ;;; handle
