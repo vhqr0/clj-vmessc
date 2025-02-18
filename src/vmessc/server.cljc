@@ -2,8 +2,11 @@
   (:require [clojure.string :as str]
             [clojure.core.async :as a]
             [clj-bytes.core :as b]
+            [vmessc.crypto :as crypto]
             [vmessc.net :as net]
             [vmessc.protocols :as proto]))
+
+;;; common
 
 (defmethod proto/->proxy-connect-info :block [_info _opts])
 
@@ -11,7 +14,16 @@
   (let [[host port] addr]
     {:net-opts {:type :tcp :host host :port port}}))
 
+;;; connect
+
+(defmulti connect
+  "Connect to server as proxy request's info."
+  (fn [_info opts] (:type opts)))
+
+;;;; proxy
+
 (defn proxy-connect
+  "Connect via proxy server."
   [info opts]
   (a/go
     (when-let [{:keys [net-opts xform-pair]} (proto/->proxy-connect-info info opts)]
@@ -23,18 +35,20 @@
                          (a/chan 1024 (comp (remove b/empty?) oxform (remove b/empty?)))]))]
         (a/<! (-> ch-pair (net/connect net-opts)))))))
 
-(defmulti connect
-  (fn [_info opts] (:type opts)))
-
 (defmethod connect :proxy [info {:keys [name proxy-opts]}]
   (let [ch (proxy-connect info proxy-opts)]
     [[name] ch]))
+
+;;;; rand-dispatch
 
 (defmethod connect :rand-dispatch [info {:keys [name sub-opts]}]
   (let [[path ch] (connect info (rand-nth sub-opts))]
     [(vec (cons name path)) ch]))
 
-(defn match-tag
+;;;; tag-dispatch
+
+(defn match-host-tag
+  "Match host's tag in tag-map."
   [host tag-map]
   (when (not (str/blank? host))
     (if-let [tag (get tag-map host)]
@@ -44,55 +58,67 @@
 
 ^:rct/test
 (comment
-  (match-tag "google.com" {"google.com" :proxy}) ; => :proxy
-  (match-tag "www.google.com" {"google.com" :proxy}) ; => :proxy
-  (match-tag "www.a.google.com" {"google.com" :proxy}) ; => :proxy
-  (match-tag "ads.google.com" {"google.com" :proxy "ads.google.com" :block}) ; => :block
-  (match-tag "baidu.com" {"google.com" :proxy}) ; => nil
+  (match-host-tag "google.com" {"google.com" :proxy}) ; => :proxy
+  (match-host-tag "www.google.com" {"google.com" :proxy}) ; => :proxy
+  (match-host-tag "www.a.google.com" {"google.com" :proxy}) ; => :proxy
+  (match-host-tag "ads.google.com" {"google.com" :proxy "ads.google.com" :block}) ; => :block
+  (match-host-tag "baidu.com" {"google.com" :proxy}) ; => nil
   )
 
-(defn info->tag
-  [tag-map {:keys [addr]}]
-  (let [[host _port] addr]
-    (match-tag host tag-map)))
+(defn match-info-tag
+  "Match proxy request info's tag. in tag-map"
+  [info tag-map]
+  (-> info (get-in [:addr 0]) (match-host-tag tag-map)))
 
 (defmethod connect :tag-dispatch [info {:keys [name tag-map default-tag sub-opts] :or {default-tag :direct}}]
-  (let [tag (or (info->tag info tag-map) default-tag)
+  (let [tag (or (match-info-tag info tag-map) default-tag)
         opts (get sub-opts tag)
         [path ch] (connect info opts)]
     [(vec (cons name path)) ch]))
 
-(defmulti log
-  (fn [_info opts] (:type opts)))
+;;; log
 
-(defmethod log :console
-  [{:keys [addr path]} _opts]
-  (println "connect to" addr "via" path))
+(defmulti log
+  "Log msg."
+  (fn [_msg opts] (:type opts)))
+
+(defmethod log :console [msg _opts]
+  (let [now (-> (crypto/now) crypto/inst-fmt)]
+    (-> msg (assoc :now now) prn)))
+
+;;; handle
 
 (defn handshake
+  "Do handshake with proxy handshake state."
   [[ich och] state]
   (a/go-loop [state state]
-    (or (proto/-handshake-info state)
-        (when-let [b (a/<! ich)]
-          (let [[b state] (proto/-handshake-advance state b)]
-            (when (or (b/empty? b) (a/>! och b))
-              (recur state)))))))
+    (if-let [info (proto/-handshake-info state)]
+      info
+      (when-let [b (a/<! ich)]
+        (let [[b state] (proto/-handshake-advance state b)]
+          (when (or (b/empty? b) (a/>! och b))
+            (recur state)))))))
 
 (defn handle
+  "Do handle proxy request."
   [client {:keys [log-opts handshake-opts connect-opts]}]
   (let [state (proto/->proxy-handshake-state handshake-opts)]
     (a/go
-      (when-let [{:keys [buffer client-xform] :as info} (a/<! (handshake client state))]
+      (when-let [{:keys [addr buffer client-xform] :as info}
+                 (a/<! (handshake client state))]
         (let [client (cond-> client
                        (some? client-xform) client-xform)
-              [path server-ch] (connect info connect-opts)
-              info (assoc info :path path)]
-          (log info log-opts)
+              [path server-ch] (connect info connect-opts)]
+          (-> {:level :info :type :connect :to addr :via path} (log log-opts))
           (when-let [server (a/<! server-ch)]
             (when (or (b/empty? buffer) (a/>! (second server) buffer))
               (a/pipe (first client) (second server))
               (a/pipe (first server) (second client)))))))))
 
+;;; server
+
 (defn start-server
-  [{:keys [port] :as ctx}]
-  (net/tcp-start-server #(handle % ctx) {:port port}))
+  "Start a proxy server."
+  [{:keys [log-opts port] :as ctx}]
+  (-> {:level :info :type :start-server :port port} (log log-opts))
+  (-> #(handle % ctx) (net/tcp-start-server {:port port})))

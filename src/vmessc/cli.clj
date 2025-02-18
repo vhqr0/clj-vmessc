@@ -4,10 +4,16 @@
             vmessc.socks5
             vmessc.vmess))
 
-(defn fetch-subs
+(defn sub-paths
+  "Get sub file paths."
+  [now]
+  [(str "conf/bak/sub.txt." now) "conf/sub.txt"])
+
+(defn fetch-sub
+  "Fetch sub."
   ([]
-   (fetch-subs (-> (crypto/now) inst-ms)))
+   (fetch-sub (-> (crypto/now) inst-ms)))
   ([now]
-   (let [subs (-> "conf/subs.url" slurp str/trim slurp)]
-     (-> subs (spit (str "conf/bak/subs.txt." now)))
-     (-> subs (spit "conf/bak/subs.txt")))))
+   (let [s (-> "conf/sub.url" slurp str/trim slurp)]
+     (doseq [path (sub-paths now)]
+       (spit path s)))))

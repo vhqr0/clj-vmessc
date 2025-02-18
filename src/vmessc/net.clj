@@ -93,9 +93,10 @@
       (when-let [res (a/<! ich)]
         (println res)))))
 
-;;; start server
+;;; server
 
 (defn tcp-start-server
+  "Start a TCP server."
   [handle opts]
   (-> (fn [stream _info]
         (let [ch-pair (-> [(a/chan 1024) (a/chan 1024)]

@@ -1,6 +1,7 @@
 (ns vmessc.crypto
   (:require [clj-bytes.core :as b])
   (:import [java.util Date]
+           [java.text SimpleDateFormat]
            [java.util.zip CRC32]
            [java.security MessageDigest]
            [javax.crypto Cipher]
@@ -13,6 +14,18 @@
   "Get current date inst."
   []
   (Date.))
+
+(def ^:dynamic *date-formatter*
+  "Inst formatter."
+  (SimpleDateFormat. "yyyy-MM-dd-HH:mm:ss"))
+
+(defn inst-fmt
+  "Format inst."
+  [i]
+  (-> *date-formatter* (.format i)))
+
+(comment
+  (inst-fmt (now)))
 
 ;;; check sum
 

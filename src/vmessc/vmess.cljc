@@ -167,18 +167,20 @@
 (defn ->req
   "Construct vmess request."
   [{:keys [addr iv key verify pad]}]
-  (-> {:ver 1
-       :iv iv
-       :key key
-       :verify verify
-       :opt 5 ; M|S
-       :pad-sec [(b/count pad) 3] ; AESGCM
-       :rsv 0
-       :cmd 1 ; TCP
-       :port (second addr)
-       :host (first addr)}
-      (st/pack st-req)
-      (b/concat! pad)))
+  (let [req (-> {:ver 1
+                 :iv iv
+                 :key key
+                 :verify verify
+                 :opt 5 ; M|S
+                 :pad-sec [(b/count pad) 3] ; AESGCM
+                 :rsv 0
+                 :cmd 1 ; TCP
+                 :port (second addr)
+                 :host (first addr)}
+                (st/pack st-req)
+                (b/concat! pad))
+        fnv1a (crypto/fnv1a req)]
+    (b/concat! req fnv1a)))
 
 (defmethod advance-encrypt-state :wait-first-frame [state b]
   (let [{:keys [param]} state
