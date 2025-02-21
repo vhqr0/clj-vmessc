@@ -17,10 +17,6 @@
   "Bakup directory path."
   "conf/bak")
 
-(def ^:dynamic *tags-path*
-  "Tags edn path."
-  "conf/tags.edn")
-
 (defn bak-prefix
   []
   (let [now (-> (sys/now) sys/inst-fmt)]
@@ -28,3 +24,15 @@
 
 (comment
   (bak-prefix))
+
+(def ^:dynamic *sub-path*
+  "Sub edn path."
+  "conf/sub.edn")
+
+(def ^:dynamic *tags-path*
+  "Tags edn path."
+  "conf/tags.edn")
+
+(def ^:dynamic *custom-tags-path*
+  "Custom tags edn path."
+  "conf/tags-custom.edn")
