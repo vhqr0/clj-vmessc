@@ -1,4 +1,4 @@
-(ns vmessc.cli.v2rayn
+(ns vmessc.cli.vn
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.data.json :as json]
@@ -51,21 +51,21 @@
             (try
               (vmess-json->param json)
               (catch Exception e
-                (core/log {:level :error :type :cli/parse-error :app :v2rayn :content-type :v2rayn/json :content json :exc e}))))))))
+                (core/log {:level :error :type :cli/parse-error :app :vn :content-type :vn/json :content json :exc e}))))))))
 
 ;;; cli
 
 (def ^:dynamic *url-path*
   "V2RayN subscribe URL path."
-  "conf/v2rayn-sub.url")
+  "conf/vn-sub.url")
 
 (def ^:dynamic *sub-path*
   "V2RayN subscribe edn path."
-  "conf/v2rayn-sub.txt")
+  "conf/vn-sub.txt")
 
 (def ^:dynamic *bak-name*
   "Backup name of V2RayN subscribe edn file."
-  "v2rayn-sub.txt")
+  "vn-sub.txt")
 
 (defn sub-paths
   "Get sub file paths."
