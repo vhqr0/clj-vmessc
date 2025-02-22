@@ -64,7 +64,7 @@
   "Construct expanded vmess id from uuid."
   [uuid]
   (let [cmd-key (crypto/md5 (b/concat! (uuid->bytes uuid) (b/of-str vmess-uuid)))
-        auth-key (-> (crypto/vd-digest! (:aid kdf-2-vds) cmd-key) (b/sub! 0 16))]
+        auth-key (-> (kdf :aid cmd-key) (b/sub! 0 16))]
     {:uuid uuid :cmd-key cmd-key :auth-key auth-key}))
 
 (comment
@@ -87,7 +87,7 @@
    (->eaid id (->auth-param)))
   ([{:keys [auth-key]} {:keys [now nonce]}]
    (let [aid (st/pack [now nonce] st-aid)
-         crc (-> (crypto/crc32 aid) (st/pack st/uint16-be))]
+         crc (-> (crypto/crc32 aid) (st/pack st/uint32-be))]
      (crypto/aes128-ecb-encrypt auth-key (b/concat! aid crc)))))
 
 (comment
@@ -205,13 +205,13 @@
         [eb state] (-> state
                        (assoc :stage :wait-frame)
                        (advance-encrypt-state b))]
-    [(b/concat! eaid nonce elen ereq eb) state]))
+    [(b/concat! eaid elen nonce ereq eb) state]))
 
 (defmethod advance-encrypt-state :wait-frame [state b]
   (let [{:keys [key ivs len-masks]} state
         eb (crypto/aes128-gcm-encrypt key (first ivs) b (b/empty))
-        len (-> (b/count eb) (bit-xor (first len-masks)) (st/pack st/uint16-be))]
-    [(b/concat! len eb)
+        elen (-> (b/count eb) (bit-xor (first len-masks)) (st/pack st/uint16-be))]
+    [(b/concat! elen eb)
      (-> state
          (update :ivs rest)
          (update :len-masks rest))]))
