@@ -110,11 +110,14 @@
      :verify (rand-int 256)
      :pad (b/rand (rand-int 16))}))
 
+(comment
+  (-> (->id (random-uuid)) (->param ["www.google.com" 80])))
+
 (defn len-masks-seq
   "Generate seq of len masks."
   [b]
   (let [r (crypto/shake128-reader b)]
-    (repeatedly #(r 2))))
+    (repeatedly #(-> (r 2) (st/unpack-one st/uint16-be)))))
 
 (defn ivs-seq
   "Generate seq of crypt ivs."
@@ -135,7 +138,7 @@
    :param param})
 
 (comment
-  (->> (len-masks-seq (b/rand 16)) (take 10) (map b/hex))
+  (->> (len-masks-seq (b/rand 16)) (take 10))
   (->> (ivs-seq (b/rand 12)) (take 10) (map b/hex)))
 
 ;;; encrypt
@@ -163,7 +166,7 @@
    :rsv st/uint8
    :cmd st/uint8
    :port st/uint16-be
-   :host (-> (st/bytes-var :uint8) st/wrap-str)))
+   :host (-> (st/bytes-var st/uint8) st/wrap-str)))
 
 (defn ->req
   "Construct vmess request."
@@ -180,8 +183,11 @@
                  :host (first addr)}
                 (st/pack st-req)
                 (b/concat! pad))
-        fnv1a (crypto/fnv1a req)]
+        fnv1a (-> (crypto/fnv1a req) (st/pack st/uint32-be))]
     (b/concat! req fnv1a)))
+
+(comment
+  (-> (->id (random-uuid)) (->param ["www.google.com" 80]) ->req))
 
 (defmethod advance-encrypt-state :wait-first-frame [state b]
   (let [{:keys [param]} state
@@ -198,7 +204,7 @@
                (crypto/aes128-gcm-encrypt key iv req eaid))
         [eb state] (-> state
                        (assoc :stage :wait-frame)
-                       (advance-encrypt-state state b))]
+                       (advance-encrypt-state b))]
     [(b/concat! eaid nonce elen ereq eb) state]))
 
 (defmethod advance-encrypt-state :wait-frame [state b]
@@ -319,12 +325,11 @@
   (let [vstate (volatile! state)]
     (fn [rf]
       (fn
-        ([]
-         (assert (= (:stage @vstate) :closed))
-         (rf))
+        ([] (rf))
         ([result]
-         (assert (= (:stage @vstate) :closed))
-         (rf result))
+         (if (= (:stage @vstate) :closed)
+           (rf result)
+           (throw (ex-info "invalid shutdown before vmess connection closed" {:stage (:stage @vstate)}))))
         ([result input]
          (let [[b state] (advance-decrypt-state @vstate input)]
            (vreset! vstate state)
