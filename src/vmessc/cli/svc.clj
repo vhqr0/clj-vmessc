@@ -23,13 +23,15 @@
 (comment
   (require '[clojure.core.async :as a])
   (require '[clj-bytes.core :as b])
-  (def params (-> core/*sub-path* slurp edn/read-string))
-  (def opts (vmess-param->vmess-opts (first params)))
-  (def buffer (b/of-str "GET / HTTP/1.1\r\nHost: www.google.com\r\n\r\n"))
-  (def addr ["www.google.com" 80])
+  (def param {:name "vmess-test"
+              :uuid "23ad6b10-8d1a-40f7-8ad0-e3e35cd38297"
+              :net {:type :tcp :host "localhost" :port 10086}})
+  (def opts (vmess-param->vmess-opts param))
+  (def buffer (b/of-str "GET / HTTP/1.1\r\nHost: www.baidu.com\r\n\r\n"))
+  (def addr ["www.baidu.com" 80])
   (def info {:addr addr :buffer buffer})
   (a/go
-    (if-let [[path ch] (server/connect info opts)]
+    (if-let [[_path ch] (server/connect info opts)]
       (let [[ich och] (a/<! ch)]
         (if (a/>! och buffer)
           (if-let [b (a/<! ich)]

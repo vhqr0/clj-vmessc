@@ -14,15 +14,15 @@
 
 (def kdf-2-labels
   "Vmess kdf second level labels."
-  {:aid "AES Auth ID Encryption"
-   :req-len-key "VMess Header AEAD Key_Length"
-   :req-len-iv "VMess Header AEAD Nonce_Length"
-   :req-key "VMess Header AEAD Key"
-   :req-iv "VMess Header AEAD Nonce"
+  {:aid          "AES Auth ID Encryption"
+   :req-len-key  "VMess Header AEAD Key_Length"
+   :req-len-iv   "VMess Header AEAD Nonce_Length"
+   :req-key      "VMess Header AEAD Key"
+   :req-iv       "VMess Header AEAD Nonce"
    :resp-len-key "AEAD Resp Header Len Key"
-   :resp-len-iv "AEAD Resp Header Len IV"
-   :resp-key "AEAD Resp Header Key"
-   :resp-iv "AEAD Resp Header IV"})
+   :resp-len-iv  "AEAD Resp Header Len IV"
+   :resp-key     "AEAD Resp Header Key"
+   :resp-iv      "AEAD Resp Header IV"})
 
 (def kdf-1-vd
   "Vmess kdf first level digest state."
@@ -73,7 +73,7 @@
 (defn ->auth-param
   "Construct vmess auth param."
   []
-  {:now (-> (sys/now) inst-ms) :nonce (b/rand 4)})
+  {:now (sys/now) :nonce (b/rand 4)})
 
 (def st-aid
   "Struct of vmess auth id."
@@ -86,7 +86,8 @@
   ([id]
    (->eaid id (->auth-param)))
   ([{:keys [auth-key]} {:keys [now nonce]}]
-   (let [aid (st/pack [now nonce] st-aid)
+   (let [now-sec (int (/ (inst-ms now) 1000.0))
+         aid (-> [now-sec nonce] (st/pack st-aid))
          crc (-> (crypto/crc32 aid) (st/pack st/uint32-be))]
      (crypto/aes128-ecb-encrypt auth-key (b/concat! aid crc)))))
 
@@ -101,7 +102,6 @@
   (let [key (b/rand 16) iv (b/rand 16)]
     {:id id
      :addr addr
-     :stage :init
      :key key
      :iv iv
      :rkey (-> (crypto/sha256 key) (b/sub! 0 16))
@@ -166,6 +166,7 @@
    :rsv st/uint8
    :cmd st/uint8
    :port st/uint16-be
+   :atype st/uint8
    :host (-> (st/bytes-var st/uint8) st/wrap-str)))
 
 (defn ->req
@@ -180,6 +181,7 @@
                  :rsv 0
                  :cmd 1 ; TCP
                  :port (second addr)
+                 :atype 2 ; domain name
                  :host (first addr)}
                 (st/pack st-req)
                 (b/concat! pad))
@@ -195,7 +197,7 @@
         {:keys [cmd-key]} id
         eaid (->eaid id)
         req (->req param)
-        len (st/pack (b/count req) st/uint16-be)
+        len (-> (b/count req) (st/pack st/uint16-be))
         elen (let [key (-> (kdf :req-len-key cmd-key eaid nonce) (b/sub! 0 16))
                    iv (-> (kdf :req-len-iv cmd-key eaid nonce) (b/sub! 0 12))]
                (crypto/aes128-gcm-encrypt key iv len eaid))

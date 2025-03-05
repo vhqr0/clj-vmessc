@@ -22,7 +22,7 @@
         p 0x01000193
         m 0xffffffff
         rf #(-> (bit-xor %1 %2) (* p) (bit-and m))]
-    (->> (seq b) (reduce rf r))))
+    (->> (b/useq b) (reduce rf r))))
 
 ^:rct/test
 (comment
