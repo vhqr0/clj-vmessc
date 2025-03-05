@@ -313,11 +313,11 @@
     (if (< (b/count buffer) len)
       [nil state]
       (let [[eb buffer] (b/split-at! len buffer)
-            iv (first ivs)
-            b (crypto/aes128-gcm-decrypt key iv eb (b/empty))
+            b (crypto/aes128-gcm-decrypt key (first ivs) eb (b/empty))
             stage (if (b/empty? b) :closed :wait-frame-len)
             [nb state] (-> state
                            (assoc :stage stage :buffer buffer)
+                           (update :ivs rest)
                            advance-decrypt-state)
             b (cond-> b
                 (some? nb) (b/concat! nb))]
