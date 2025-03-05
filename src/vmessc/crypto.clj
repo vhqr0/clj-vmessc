@@ -143,7 +143,7 @@
   "Encrypt or decrypt bytes with AES128 ECB."
   [key b mode]
   (let [key (if-not (bytes? key) key (->aes-key key))
-        c (doto (Cipher/getInstance "AES/ECB/PKCS5Padding")
+        c (doto (Cipher/getInstance "AES/ECB/NoPadding")
             (.init mode key))]
     (.doFinal c b)))
 

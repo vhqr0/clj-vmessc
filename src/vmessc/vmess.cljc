@@ -46,7 +46,7 @@
                 (reduce
                  (fn [vd ^bytes label]
                    (-> vd (crypto/->recur-vd label)))
-                 (get kdf-2-vds type)))]
+                 (crypto/vd-clone (get kdf-2-vds type))))]
     (crypto/vd-digest! vd b)))
 
 ;;; id
@@ -70,26 +70,32 @@
 (comment
   (->id (random-uuid)))
 
-(defn ->auth-param
-  "Construct vmess auth param."
-  []
-  {:now (sys/now) :nonce (b/rand 4)})
-
 (def st-aid
   "Struct of vmess auth id."
   (st/tuple
    st/int64-be
    (st/bytes-fixed 4)))
 
+(defn ->auth-param
+  "Construct vmess auth param."
+  []
+  {:now (sys/now) :nonce (b/rand 4)})
+
+(defn ->aid
+  "Convert auth param to aid bytes."
+  [{:keys [now nonce]}]
+  (let [now-sec (int (/ (inst-ms now) 1000.0))
+        aid (-> [now-sec nonce] (st/pack st-aid))
+        crc32 (-> (crypto/crc32 aid) (st/pack st/uint32-be))]
+    (b/concat! aid crc32)))
+
 (defn ->eaid
   "Construct vmess eaid."
   ([id]
    (->eaid id (->auth-param)))
-  ([{:keys [auth-key]} {:keys [now nonce]}]
-   (let [now-sec (int (/ (inst-ms now) 1000.0))
-         aid (-> [now-sec nonce] (st/pack st-aid))
-         crc (-> (crypto/crc32 aid) (st/pack st/uint32-be))]
-     (crypto/aes128-ecb-encrypt auth-key (b/concat! aid crc)))))
+  ([{:keys [auth-key]} param]
+   (let [aid (->aid param)]
+     (crypto/aes128-ecb-encrypt auth-key aid))))
 
 (comment
   (-> (random-uuid) ->id ->eaid))
