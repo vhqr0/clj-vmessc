@@ -260,7 +260,7 @@
             key (-> (kdf :resp-len-key rkey) (b/sub! 0 16))
             iv (-> (kdf :resp-len-iv riv) (b/sub! 0 12))
             len (-> (crypto/aes128-gcm-decrypt key iv elen (b/empty))
-                    (st/unpack st/uint16-be))]
+                    (st/unpack-one st/uint16-be))]
         (-> state
             ;; assoc encrypted req len
             (assoc :stage :wait-resp :buffer buffer :len (+ len 16))
@@ -275,14 +275,15 @@
    :data (st/bytes-var st/uint8)))
 
 (defmethod advance-decrypt-state :wait-resp [state]
-  (let [{:keys [buffer rkey riv verify len]} state]
+  (let [{:keys [param buffer len]} state
+        {:keys [rkey riv verify]} param]
     (if (< (b/count buffer) len)
       [nil state]
       (let [[eresp buffer] (b/split-at! len buffer)
             key (-> (kdf :resp-key rkey) (b/sub! 0 16))
             iv (-> (kdf :resp-iv riv) (b/sub! 0 12))
             resp (-> (crypto/aes128-gcm-decrypt key iv eresp (b/empty))
-                     (st/unpack st-resp))]
+                     (st/unpack-one st-resp))]
         (if-not (= verify (:verify resp))
           (throw (ex-info "verify vmess resp failed" {}))
           (-> state
@@ -294,7 +295,7 @@
   [state len]
   (let [{:keys [len-masks]} state]
     (-> state
-        (assoc :len (-> len (st/unpack st/uint16-be) (bit-xor (first len-masks))))
+        (assoc :len (-> len (st/unpack-one st/uint16-be) (bit-xor (first len-masks))))
         (update :len-masks rest))))
 
 (defmethod advance-decrypt-state :wait-frame-len [state]
@@ -339,7 +340,8 @@
            (rf result)
            (throw (ex-info "invalid shutdown before vmess connection closed" {:stage (:stage @vstate)}))))
         ([result input]
-         (let [[b state] (advance-decrypt-state @vstate input)]
+         (vswap! vstate update :buffer b/concat! input)
+         (let [[b state] (advance-decrypt-state @vstate)]
            (vreset! vstate state)
            (when (some? b)
              (rf result b))))))))
