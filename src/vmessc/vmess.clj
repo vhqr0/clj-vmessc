@@ -1,12 +1,185 @@
 (ns vmessc.vmess
-  (:require [clj-bytes.core :as b]
+  (:require [clojure.string :as str]
+            [clojure.core.async :as a]
+            [clj-bytes.core :as b]
             [clj-bytes.struct :as st]
-            [clojure.string :as str]
-            [vmessc.sys :as sys]
-            [vmessc.crypto :as crypto]
-            [vmessc.protocols :as proto]))
+            [clj-proxy.core :as prx])
+  (:import [java.util Date]
+           [java.util.zip CRC32]
+           [java.security MessageDigest]
+           [javax.crypto Cipher]
+           [javax.crypto.spec SecretKeySpec GCMParameterSpec]
+           [org.bouncycastle.crypto.digests SHAKEDigest]))
 
-;;; kdf
+;;; crypto
+
+;;;; now
+
+(defn now
+  "Get current inst."
+  []
+  (Date.))
+
+;;;; check sum
+
+(defn crc32
+  "Get crc32 check sum in int."
+  [b]
+  (let [c (doto (CRC32.)
+            (.update b))]
+    (.getValue c)))
+
+(defn fnv1a
+  "Get fnv1a check sum in int."
+  [b]
+  (let [r 0x811c9dc5
+        p 0x01000193
+        m 0xffffffff
+        rf #(-> (bit-xor %1 %2) (* p) (bit-and m))]
+    (->> (b/useq b) (reduce rf r))))
+
+^:rct/test
+(comment
+  (crc32 (b/of-str "hello")) ; => 907060870
+  (fnv1a (b/of-str "hello")) ; => 1335831723
+  )
+
+;;;; digest
+
+(defn digest
+  "Message digest."
+  [b algo]
+  (-> (MessageDigest/getInstance algo)
+      (.digest b)))
+
+(defn md5 [b] (digest b "MD5"))
+(defn sha256 [b] (digest b "SHA-256"))
+
+^:rct/test
+(comment
+  (-> (b/of-str "hello") md5 b/hex)
+  ;; => "5d41402abc4b2a76b9719d911017c592"
+  (-> (b/of-str "hello") sha256 b/hex)
+  ;; => "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+  )
+
+;;;;; vmess digest
+
+(defprotocol VmessDigest
+  "Abstraction for clonable vmess digest function."
+  (vd-clone [this]
+    "Clone vmess digest state.")
+  (vd-update! [this b]
+    "Update digest state, impure.")
+  (vd-digest! [this b]
+    "Do digest, impure."))
+
+(defrecord SHA256VmessDigest [d]
+  VmessDigest
+  (vd-clone [_]
+    (->SHA256VmessDigest (.clone d)))
+  (vd-update! [_ b]
+    (.update d b))
+  (vd-digest! [_ b]
+    (.digest d b)))
+
+(defrecord RecurVmessDigest [ivd ovd]
+  VmessDigest
+  (vd-clone [_]
+    (->RecurVmessDigest (vd-clone ivd) (vd-clone ovd)))
+  (vd-update! [_ b]
+    (vd-update! ivd b))
+  (vd-digest! [_ b]
+    (vd-digest! ovd (vd-digest! ivd b))))
+
+(defn ->sha256-vd
+  "Construct SHA256 vmess digest state."
+  []
+  (->SHA256VmessDigest (MessageDigest/getInstance "SHA-256")))
+
+(defn hmac-expand-key
+  "Expand key in HMAC format."
+  [^bytes k]
+  (if (> (b/count k) 64)
+    (throw (ex-info "vmess digest assert key length <= 64" {}))
+    (let [^bytes ik (-> (byte-array 64) (b/fill! 0x36))
+          ^bytes ok (-> (byte-array 64) (b/fill! 0x5c))]
+      (dotimes [i (alength k)]
+        (let [b (aget k i)]
+          (aset-byte ik i (unchecked-byte (bit-xor b 0x36)))
+          (aset-byte ok i (unchecked-byte (bit-xor b 0x5c)))))
+      [ik ok])))
+
+(defn ->recur-vd
+  "Construct recur vmess digest state,
+  based on a base digest state and key."
+  [vd ^bytes k]
+  (let [[ik ok] (hmac-expand-key k)
+        ivd (doto (vd-clone vd) (vd-update! ik))
+        ovd (doto (vd-clone vd) (vd-update! ok))]
+    (->RecurVmessDigest ivd ovd)))
+
+^:rct/test
+(comment
+  (-> (->sha256-vd)
+      (->recur-vd (b/of-str "hello"))
+      (vd-digest! (b/of-str "world"))
+      b/hex)
+  ;; => "f1ac9702eb5faf23ca291a4dc46deddeee2a78ccdaf0a412bed7714cfffb1cc4"
+  )
+
+;;;; mask generator
+
+(defn shake128-reader
+  "Get reader function of shake128 random bytes generator."
+  [b]
+  (let [d (doto (SHAKEDigest. 128)
+            (.update b 0 (alength b)))]
+    (fn [n]
+      (let [b (byte-array n)]
+        (.doOutput d b 0 n)
+        b))))
+
+(comment
+  (def r (shake128-reader (b/of-str "hello")))
+  (b/hex (r 2)) ; => "8eb4"
+  (b/hex (r 2)) ; => "b6a9"
+  )
+
+;;;; cipher
+
+(defn ->aes-key
+  "Get expanded AES key."
+  [key]
+  (SecretKeySpec. key "AES"))
+
+(defn aes128-ecb-crypt
+  "Encrypt or decrypt bytes with AES128 ECB."
+  [key b mode]
+  (let [key (if-not (bytes? key) key (->aes-key key))
+        c (doto (Cipher/getInstance "AES/ECB/NoPadding")
+            (.init mode key))]
+    (.doFinal c b)))
+
+(defn aes128-ecb-encrypt [key b] (aes128-ecb-crypt key b Cipher/ENCRYPT_MODE))
+(defn aes128-ecb-decrypt [key b] (aes128-ecb-crypt key b Cipher/DECRYPT_MODE))
+
+(defn aes128-gcm-crypt
+  "Encryt or decrypt bytes with AES128 GCM."
+  [key iv b aad mode]
+  (let [key (if-not (bytes? key) key (->aes-key key))
+        iv (GCMParameterSpec. 128 iv)
+        c (doto (Cipher/getInstance "AES/GCM/NoPadding")
+            (.init mode key iv)
+            (.updateAAD aad))]
+    (.doFinal c b)))
+
+(defn aes128-gcm-encrypt [key iv b aad] (aes128-gcm-crypt key iv b aad Cipher/ENCRYPT_MODE))
+(defn aes128-gcm-decrypt [key iv b aad] (aes128-gcm-crypt key iv b aad Cipher/DECRYPT_MODE))
+
+;;; vmess
+
+;;;; kdf
 
 (def kdf-1-label
   "Vmess kdf first level label."
@@ -26,15 +199,15 @@
 
 (def kdf-1-vd
   "Vmess kdf first level digest state."
-  (-> (crypto/->sha256-vd)
-      (crypto/->recur-vd (b/of-str kdf-1-label))))
+  (-> (->sha256-vd)
+      (->recur-vd (b/of-str kdf-1-label))))
 
 (def kdf-2-vds
   "Vmess kdf second level digest states."
   (->> kdf-2-labels
        (map
         (fn [[k l]]
-          (let [vd (-> kdf-1-vd (crypto/->recur-vd (b/of-str l)))]
+          (let [vd (-> kdf-1-vd (->recur-vd (b/of-str l)))]
             [k vd])))
        (into {})))
 
@@ -45,11 +218,11 @@
   (let [vd (->> labels
                 (reduce
                  (fn [vd ^bytes label]
-                   (-> vd (crypto/->recur-vd label)))
-                 (crypto/vd-clone (get kdf-2-vds type))))]
-    (crypto/vd-digest! vd b)))
+                   (-> vd (->recur-vd label)))
+                 (vd-clone (get kdf-2-vds type))))]
+    (vd-digest! vd b)))
 
-;;; id
+;;;; auth
 
 (def vmess-uuid
   "Vmess uuid."
@@ -63,7 +236,7 @@
 (defn ->id
   "Construct expanded vmess id from uuid."
   [uuid]
-  (let [cmd-key (crypto/md5 (b/concat! (uuid->bytes uuid) (b/of-str vmess-uuid)))
+  (let [cmd-key (md5 (b/concat! (uuid->bytes uuid) (b/of-str vmess-uuid)))
         auth-key (-> (kdf :aid cmd-key) (b/sub! 0 16))]
     {:uuid uuid :cmd-key cmd-key :auth-key auth-key}))
 
@@ -79,14 +252,14 @@
 (defn ->auth-param
   "Construct vmess auth param."
   []
-  {:now (sys/now) :nonce (b/rand 4)})
+  {:now (now) :nonce (b/rand 4)})
 
 (defn ->aid
   "Convert auth param to aid bytes."
   [{:keys [now nonce]}]
   (let [now-sec (int (/ (inst-ms now) 1000.0))
         aid (-> [now-sec nonce] (st/pack st-aid))
-        crc32 (-> (crypto/crc32 aid) (st/pack st/uint32-be))]
+        crc32 (-> (crc32 aid) (st/pack st/uint32-be))]
     (b/concat! aid crc32)))
 
 (defn ->eaid
@@ -95,12 +268,12 @@
    (->eaid id (->auth-param)))
   ([{:keys [auth-key]} param]
    (let [aid (->aid param)]
-     (crypto/aes128-ecb-encrypt auth-key aid))))
+     (aes128-ecb-encrypt auth-key aid))))
 
 (comment
   (-> (random-uuid) ->id ->eaid))
 
-;;; param
+;;;; param
 
 (defn ->param
   "Construct vmess connection param."
@@ -110,8 +283,8 @@
      :addr addr
      :key key
      :iv iv
-     :rkey (-> (crypto/sha256 key) (b/sub! 0 16))
-     :riv (-> (crypto/sha256 iv) (b/sub! 0 16))
+     :rkey (-> (sha256 key) (b/sub! 0 16))
+     :riv (-> (sha256 iv) (b/sub! 0 16))
      :nonce (b/rand 8)
      :verify (rand-int 256)
      :pad (b/rand (rand-int 16))}))
@@ -122,7 +295,7 @@
 (defn len-masks-seq
   "Generate seq of len masks."
   [b]
-  (let [r (crypto/shake128-reader b)]
+  (let [r (shake128-reader b)]
     (repeatedly #(-> (r 2) (st/unpack-one st/uint16-be)))))
 
 (defn ivs-seq
@@ -138,7 +311,7 @@
 (defn ->crypt-state
   "Construct base crypt state."
   [key iv param]
-  {:key (crypto/->aes-key key)
+  {:key (->aes-key key)
    :ivs (ivs-seq (b/sub! iv 2 12))
    :len-masks (len-masks-seq iv)
    :param param})
@@ -147,7 +320,7 @@
   (->> (len-masks-seq (b/rand 16)) (take 10))
   (->> (ivs-seq (b/rand 12)) (take 10) (map b/hex)))
 
-;;; encrypt
+;;;; encrypt
 
 (defn ->encrypt-state
   "Construct encrypt state."
@@ -191,7 +364,7 @@
                  :host (first addr)}
                 (st/pack st-req)
                 (b/concat! pad))
-        fnv1a (-> (crypto/fnv1a req) (st/pack st/uint32-be))]
+        fnv1a (-> (fnv1a req) (st/pack st/uint32-be))]
     (b/concat! req fnv1a)))
 
 (comment
@@ -206,10 +379,10 @@
         len (-> (b/count req) (st/pack st/uint16-be))
         elen (let [key (-> (kdf :req-len-key cmd-key eaid nonce) (b/sub! 0 16))
                    iv (-> (kdf :req-len-iv cmd-key eaid nonce) (b/sub! 0 12))]
-               (crypto/aes128-gcm-encrypt key iv len eaid))
+               (aes128-gcm-encrypt key iv len eaid))
         ereq (let [key (-> (kdf :req-key cmd-key eaid nonce) (b/sub! 0 16))
                    iv (-> (kdf :req-iv cmd-key eaid nonce) (b/sub! 0 12))]
-               (crypto/aes128-gcm-encrypt key iv req eaid))
+               (aes128-gcm-encrypt key iv req eaid))
         [eb state] (-> state
                        (assoc :stage :wait-frame)
                        (advance-encrypt-state b))]
@@ -217,14 +390,14 @@
 
 (defmethod advance-encrypt-state :wait-frame [state b]
   (let [{:keys [key ivs len-masks]} state
-        eb (crypto/aes128-gcm-encrypt key (first ivs) b (b/empty))
+        eb (aes128-gcm-encrypt key (first ivs) b (b/empty))
         elen (-> (b/count eb) (bit-xor (first len-masks)) (st/pack st/uint16-be))]
     [(b/concat! elen eb)
      (-> state
          (update :ivs rest)
          (update :len-masks rest))]))
 
-(defn ->encrypt-xform
+(defn ->encrypt-xf
   "Construct vmess encrypt trans function for async chan."
   [state]
   (let [vstate (volatile! state)]
@@ -237,7 +410,7 @@
            (vreset! vstate state)
            (rf result b)))))))
 
-;;; cryptor
+;;;; decrypt
 
 (defn ->decrypt-state
   "Construct decrypt state."
@@ -259,7 +432,7 @@
       (let [[elen buffer] (b/split-at! 18 buffer)
             key (-> (kdf :resp-len-key rkey) (b/sub! 0 16))
             iv (-> (kdf :resp-len-iv riv) (b/sub! 0 12))
-            len (-> (crypto/aes128-gcm-decrypt key iv elen (b/empty))
+            len (-> (aes128-gcm-decrypt key iv elen (b/empty))
                     (st/unpack-one st/uint16-be))]
         (-> state
             ;; assoc encrypted req len
@@ -282,7 +455,7 @@
       (let [[eresp buffer] (b/split-at! len buffer)
             key (-> (kdf :resp-key rkey) (b/sub! 0 16))
             iv (-> (kdf :resp-iv riv) (b/sub! 0 12))
-            resp (-> (crypto/aes128-gcm-decrypt key iv eresp (b/empty))
+            resp (-> (aes128-gcm-decrypt key iv eresp (b/empty))
                      (st/unpack-one st-resp))]
         (if-not (= verify (:verify resp))
           (throw (ex-info "verify vmess resp failed" {}))
@@ -313,7 +486,7 @@
     (if (< (b/count buffer) len)
       [nil state]
       (let [[eb buffer] (b/split-at! len buffer)
-            b (crypto/aes128-gcm-decrypt key (first ivs) eb (b/empty))
+            b (aes128-gcm-decrypt key (first ivs) eb (b/empty))
             stage (if (b/empty? b) :closed :wait-frame-len)
             [nb state] (-> state
                            (assoc :stage stage :buffer buffer)
@@ -328,7 +501,7 @@
     (throw (ex-info "invalid data after vmess connection closed" {}))
     [nil state]))
 
-(defn ->decrypt-xform
+(defn ->decrypt-xf
   "Construct vmess decrypt trans function for async chan."
   [state]
   (let [vstate (volatile! state)]
@@ -346,14 +519,28 @@
            (when (some? b)
              (rf result b))))))))
 
-;;; connect
+;;;; register
 
-(defn ->xform-pair
-  "Construct vmess xform pair."
+(defn ->xf-pair
+  "Construct vmess xf pair."
   [param]
-  [(->decrypt-xform (->decrypt-state param))
-   (->encrypt-xform (->encrypt-state param))])
+  [(->decrypt-xf (->decrypt-state param))
+   (->encrypt-xf (->encrypt-state param))])
 
-(defmethod proto/->proxy-connect-info :vmess [{:keys [addr]} {:keys [id net-opts]}]
-  (let [param (->param id addr)]
-    {:net-opts net-opts :xform-pair (->xform-pair param)}))
+(defn ->server
+  [server param]
+  (let [[ixf oxf] (->xf-pair param)
+        ich (a/chan 1024 ixf)
+        och (a/chan 1024 oxf)]
+    (a/pipe (first server) och)
+    (a/pipe ich (second server))
+    [ich och]))
+
+(defrecord VmessClient [param]
+  prx/HandShake
+  (hs-update [_ b] (throw (ex-info "invalid update in client handshake" {})))
+  (hs-advance [this] [nil this])
+  (hs-info [_] {:server-xf #(->server % param)}))
+
+(defmethod prx/->proxy-client :vmess [addr {:keys [id]}]
+  (->VmessClient (->param id addr)))
