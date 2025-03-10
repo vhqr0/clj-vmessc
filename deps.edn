@@ -2,4 +2,4 @@
  :deps {io.github.vhqr0/clj-proxy {:local/root "../clj-proxy"}
         org.clojure/data.json {:mvn/version "2.5.1"}
         org.bouncycastle/bcprov-jdk18on {:mvn/version "1.78.1"}}
- :aliases {:dev {}}}
+ :aliases {:dev {:extra-paths ["test"]}}}

@@ -539,15 +539,15 @@
   (let [[ixf oxf] (->xf-pair param)
         ich (a/chan 1024 ixf)
         och (a/chan 1024 oxf)]
-    (a/pipe (first server) och)
-    (a/pipe ich (second server))
+    (a/pipe (first server) ich)
+    (a/pipe och (second server))
     [ich och]))
 
 (defrecord VmessClient [param]
   prx/HandShake
   (hs-update [_ _b] (throw (ex-info "invalid update in client handshake" {})))
   (hs-advance [this] [nil this])
-  (hs-info [_] {:server-xf #(->server % param)}))
+  (hs-info [_] {:type :ok :server-xf #(->server % param)}))
 
 (defmethod prx/->proxy-client :vmess [addr {:keys [id]}]
   (->VmessClient (->param id addr)))
@@ -622,7 +622,7 @@
 
 (defn vmess-edn->proxy-opts
   [{:keys [uuid]}]
-  {:id (->id uuid)})
+  {:type :vmess :id (->id uuid)})
 
 (defn vmess-edn->opts
   [{:keys [name] :as edn}]
