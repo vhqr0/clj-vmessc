@@ -1,6 +1,9 @@
 (ns vmessc.core
   (:require [clojure.string :as str]
             [clojure.edn :as edn]
+            [clj-proxy.core :as prx]
+            clj-proxy.net
+            clj-proxy.socks5
             [vmessc.vmess :as vmess])
   (:import [java.util Date]
            [java.text SimpleDateFormat]))
@@ -25,24 +28,58 @@
   ([i]
    (-> *date-formatter* (.format i))))
 
-(defn bak-prefix
+(defn with-conf-prefix
   [name]
-  (str "conf/bak/" (inst-fmt) \. name))
+  (str "conf/" name))
+
+(defn with-bak-prefix
+  [name]
+  (with-conf-prefix (str "bak/" (inst-fmt) \. name)))
 
 (comment
   (inst-fmt)
-  (bak-prefix "tags.edn"))
+  (with-bak-prefix "tags.edn"))
 
-;;; domain list community
+(defn conf-spit
+  [name data]
+  (spit (with-bak-prefix name) data)
+  (spit (with-conf-prefix name) data))
 
+(defn conf-slurp
+  [name]
+  (slurp (with-conf-prefix name)))
+
+;;; tags
+
+(defn tags-gen
+  ([]
+   (tags-gen ["tags-dlc.edn" "tags-custom.edn"]))
+  ([sources]
+   (->> sources
+        (mapcat #(edn/read-string (conf-slurp %)))
+        vec
+        (conf-spit "tags.edn"))))
+
+(defn tags-load
+  []
+  (edn/read-string (conf-slurp "tags.edn")))
+
+;;;; dlc
+
+;; domain list community
 ;; origin: https://github.com/v2fly/domain-list-community
 ;; my fork: https://github.com/vhqr0/domain-list-community
 
-(defn dlc-data-path [name]
-  (str "conf/domain-list-community/data/" name))
+(defn dlc-data-path
+  [name]
+  (str "domain-list-community/data/" name))
+
+(defn dlc-data-slurp
+  [name]
+  (conf-slurp (dlc-data-path name)))
 
 (comment
-  (dlc-data-path "cn") ; => "conf/domain-list-community/data/cn"
+  (dlc-data-path "cn") ; => "domain-list-community/data/cn"
   )
 
 (def dlc-line-re
@@ -60,7 +97,7 @@
 (defn dlc-tags-seq
   "Return seq of tags."
   [name default-tag]
-  (->> (slurp (dlc-data-path name))
+  (->> (dlc-data-slurp name)
        str/split-lines
        (mapcat
         (fn [line]
@@ -81,22 +118,15 @@
 
 (defn dlc-tags-gen
   []
-  (let [tags (vec (concat
-                   (dlc-tags-seq "cn" :direct)
-                   (dlc-tags-seq "geolocation-!cn" :proxy)))]
-    (spit "conf/tags-dlc.edn" tags)
-    (spit (bak-prefix "tags-dlc.edn") tags)))
-
-(defn tags-load
-  []
   (->> (concat
-        (edn/read-string (slurp "conf/tags-dlc.edn"))
-        (edn/read-string (slurp "conf/tags-custom.edn")))
-       (into {})))
+        (dlc-tags-seq "cn" :direct)
+        (dlc-tags-seq "geolocation-!cn" :proxy))
+       vec
+       (conf-spit "tags-dlc.edn")))
 
-;;; v2rayn sub
+;;; sub
 
-(defn sub->vmess-edn
+(defn sub->edn
   [s]
   (->> (vmess/v2rayn-sub->urls s)
        (filter #(str/starts-with? % "vmess://"))
@@ -109,35 +139,43 @@
 
 (defn sub-fetch
   []
-  (let [s (-> "conf/sub.url" slurp str/trim slurp)]
-    (spit "conf/sub.txt" s)
-    (spit (bak-prefix "sub.txt") s)))
+  (->> (conf-slurp "sub.url") str/trim slurp (conf-spit "sub.txt")))
 
 (defn sub-gen
   []
-  (let [s (-> "conf/sub.txt" slurp sub->vmess-edn vec)]
-    (spit "conf/sub.edn" s)
-    (spit (bak-prefix "sub.edn") s)))
+  (->> (conf-slurp "sub.txt") sub->edn vec (conf-spit "sub.edn")))
 
 (defn sub-load
   []
-  (-> "conf/sub.edn" slurp edn/read-string))
+  (edn/read-string (conf-slurp "sub.edn")))
 
 ;;; server
 
-(defn server-context
-  [tag-map sub {:keys [port] :or {port 1080}}]
-  {:log-fn prn
-   :net-server-opts {:type :tcp :port port}
-   :proxy-server-opts {:type :socks5}
-   :connect-opts {:type :tag-dispatch
-                  :name "main"
-                  :tag-map tag-map
-                  :default-tag :direct
-                  :sub-opts {:direct {:type :direct :name "direct"}
-                             :block {:type :block :name "block"}
-                             :proxy {:type :rand-dispatch
-                                     :name "proxy"
-                                     :sub-opts (->> sub
-                                                    (filter :enable?)
-                                                    (mapv vmess/vmess-edn->opts))}}}})
+(defn port-load
+  []
+  (edn/read-string (conf-slurp "port.edn")))
+
+(defn server-context-load
+  ([]
+   (let [port (port-load)
+         tag-map (->> (tags-load) (into {}))
+         sub-opts (->> (sub-load) (filter :enable?) (mapv vmess/vmess-edn->opts))]
+     (assert (seq sub-opts))
+     (server-context-load port tag-map sub-opts)))
+  ([port tag-map sub-opts]
+   {:log-fn *log-fn*
+    :net-server-opts {:type :tcp :port port}
+    :proxy-server-opts {:type :socks5}
+    :connect-opts {:type :tag-dispatch
+                   :name "main"
+                   :tag-map tag-map
+                   :default-tag :direct
+                   :sub-opts {:direct {:type :direct :name "direct"}
+                              :block {:type :block :name "block"}
+                              :proxy {:type :rand-dispatch :name "proxy" :sub-opts sub-opts}}}}))
+
+(defn start-server
+  ([]
+   (prx/start-server (server-context-load)))
+  ([context]
+   (prx/start-server context)))
