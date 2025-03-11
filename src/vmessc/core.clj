@@ -56,7 +56,7 @@
    :test-timeout-ms 10000
    :server-port 10086
    :server-default-tag :direct
-   :server-log-types #{:info :error}})
+   :server-log-levels #{:info :error}})
 
 (defn opts-load
   []
@@ -216,16 +216,45 @@
 
 ;;; server
 
+(defn server-log
+  [msg opts]
+  (let [{:keys [levels prefer-info-keys]
+         :or {levels #{:debug :info :error}
+              prefer-info-keys [:uuid :level :type :addr]}}
+        opts]
+    (when (contains? levels (:level msg))
+      (let [timestamp (Date.)
+            data (->> prefer-info-keys
+                      (reduce
+                       (fn [data k]
+                         (let [v (get msg k)]
+                           (cond-> data (some? v) (conj v))))
+                       [timestamp]))
+            msg (->> prefer-info-keys
+                     (reduce dissoc msg)
+                     (remove #(nil? (val %)))
+                     (into {}))
+            data (cond-> data
+                   (seq msg) (conj msg))]
+        (prn data)))))
+
+(defn start-server-log
+  [ch opts]
+  (a/go-loop []
+    (when-let [msg (a/<! ch)]
+      (server-log msg opts)
+      (recur))))
+
 (defn server-context-load
   ([]
    (let [opts (opts-load)
          tag-map (->> (tags-load) (into {}))
          sub-opts (->> (sub-load) (filter :selected?) (mapv vmess/vmess-edn->opts))]
-     (assert (seq sub-opts))
      (server-context-load opts tag-map sub-opts)))
   ([opts tag-map sub-opts]
-   (let [{:keys [server-port server-default-tag]} opts]
-     {:log-fn *log-fn*
+   {:pre [(seq sub-opts)]}
+   (let [{:keys [server-port server-default-tag server-log-levels]} opts]
+     {:log-opts {:levels server-log-levels}
       :net-server-opts {:type :tcp :port server-port}
       :proxy-server-opts {:type :socks5}
       :connect-opts {:type :tag-dispatch
@@ -238,6 +267,9 @@
 
 (defn start-server
   ([]
-   (prx/start-server (server-context-load)))
+   (start-server (server-context-load)))
   ([context]
-   (prx/start-server context)))
+   (let [{:keys [log-opts]} context
+         log-ch (a/chan 1024)]
+     (start-server-log log-ch log-opts)
+     [log-ch (a/<!! (prx/start-server (assoc context :log-fn #(a/put! log-ch %))))])))
