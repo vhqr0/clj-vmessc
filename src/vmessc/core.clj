@@ -54,7 +54,7 @@
 (def default-opts
   {:tags-fallback :direct
    :tags-source ["tags-dlc.edn" "tags-custom.edn"]
-   :test-http-server-addr ["www.google.com" 80]
+   :test-server-addr ["www.google.com" 80]
    :test-timeout-ms 10000
    :server-port 10086
    :server-log-types #{:info :error}})
@@ -186,13 +186,15 @@
 (defn sub-test-connect
   [{:keys [name uuid] :as edn} [host _ :as addr]]
   (let [opts (vmess/vmess-edn->opts edn)
-        context {:log-fn prn :uuid uuid :addr addr}]
+        context {:log-fn *log-fn* :uuid uuid :addr addr}]
     (a/go
       (prx/log context {:level :debug :type :test-connect :via name})
       (if-let [{[ich och] :server} (a/<! (prx/connect context opts))]
         (if (a/>! och (b/of-str (str "GET / HTTP/1.1\r\nHost: " host "\r\n\r\n")))
           (if (some? (a/<! ich))
             (do
+              (a/close! ich)
+              (a/close! och)
               (prx/log context {:level :debug :type :test-connect-ok :via name})
               :ok)
             (prx/log context {:level :error :type :test-connect-error :reason :test-connect/read :via name}))
@@ -200,31 +202,25 @@
         (prx/log context {:level :error :type :test-connect-error :reason :test-connect/connect :via name})))))
 
 (defn sub-test-1
-  [i edn addr timeout-ms]
+  [edn addr timeout-ms]
   (let [start-inst (now)]
     (a/go
       (let [connect-ch (sub-test-connect edn addr)
             timeout-ch (a/timeout timeout-ms)]
         (a/alt!
-          connect-ch ([_]
-                      (let [end-inst (now)
-                            delay (- (inst-ms end-inst) (inst-ms start-inst))]
-                        (sub-list-1 i (assoc edn :selected? true :delay delay))
-                        delay))
-          timeout-ch ([_]
-                      (sub-list-1 i (assoc edn :selected? false :delay :timeout))
-                      :timeout))))))
+          connect-ch ([_] (- (inst-ms (now)) (inst-ms start-inst)))
+          timeout-ch ([_] :timeout))))))
 
 (defn sub-test
   []
-  (let [{:keys [test-http-server-addr test-timeout-ms]} (opts-load)
-        sub-atm (atom (sub-load))]
-    (doseq [[i edn] (->> @sub-atm (map-indexed vector))]
+  (let [{:keys [test-server-addr test-timeout-ms]} (opts-load)
+        sub-atom (atom (sub-load))]
+    (doseq [[i edn] (->> @sub-atom (map-indexed vector))]
       (a/go
-        (let [delay (or (a/<! (sub-test-1 i edn test-http-server-addr test-timeout-ms)) :timeout)]
-          (swap! sub-atm update i merge {:selected? (not= delay :timeout) :delay delay}))))
+        (let [delay (or (a/<! (sub-test-1 edn test-server-addr test-timeout-ms)) :timeout)]
+          (swap! sub-atom update i merge {:selected? (not= delay :timeout) :delay delay}))))
     (Thread/sleep (+ test-timeout-ms 1000))
-    (let [s @sub-atm]
+    (let [s @sub-atom]
       (*log-fn* {:type :test/finish})
       (->> s (conf-spit "sub.edn")))))
 

@@ -1,7 +1,6 @@
 (ns vmessc.vmess
   (:require [clojure.string :as str]
             [clojure.data.json :as json]
-            [clojure.core.async :as a]
             [clj-bytes.core :as b]
             [clj-bytes.struct :as st]
             [clj-proxy.core :as prx])
