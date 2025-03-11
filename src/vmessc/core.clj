@@ -218,19 +218,19 @@
 
 (defn server-log
   [msg opts]
-  (let [{:keys [levels prefer-info-keys]
+  (let [{:keys [levels prefer-keys]
          :or {levels #{:debug :info :error}
-              prefer-info-keys [:uuid :level :type :addr]}}
+              prefer-keys [:uuid :level :type :addr]}}
         opts]
     (when (contains? levels (:level msg))
-      (let [timestamp (Date.)
-            data (->> prefer-info-keys
+      (let [timestamp (now)
+            data (->> prefer-keys
                       (reduce
                        (fn [data k]
                          (let [v (get msg k)]
                            (cond-> data (some? v) (conj v))))
                        [timestamp]))
-            msg (->> prefer-info-keys
+            msg (->> prefer-keys
                      (reduce dissoc msg)
                      (remove #(nil? (val %)))
                      (into {}))
