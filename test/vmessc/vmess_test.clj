@@ -1,7 +1,7 @@
 (ns vmessc.vmess-test
   (:require [clojure.core.async :as a]
             [clj-bytes.core :as b]
-            [clj-proxy.core :as core]
+            [clj-proxy.core :as prx]
             clj-proxy.net
             [vmessc.vmess :as vmess]))
 
@@ -20,7 +20,7 @@
   [host]
   (let [context {:addr [host 80] :log-fn prn}]
     (a/go
-      (if-let [{[ich och] :server} (a/<! (core/connect context vmess-opts))]
+      (if-let [{[ich och] :server} (a/<! (prx/connect context vmess-opts))]
         (if (a/>! och (b/of-str (str "GET / HTTP/1.1\r\nHost: " host "\r\n\r\n")))
           (if-let [b (a/<! ich)]
             (println (b/str b))

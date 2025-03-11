@@ -107,15 +107,14 @@
 (defn hmac-expand-key
   "Expand key in HMAC format."
   [^bytes k]
-  (if (> (b/count k) 64)
-    (throw (ex-info "vmess digest assert key length <= 64" {}))
-    (let [^bytes ik (-> (byte-array 64) (b/fill! 0x36))
-          ^bytes ok (-> (byte-array 64) (b/fill! 0x5c))]
-      (dotimes [i (alength k)]
-        (let [b (aget k i)]
-          (aset-byte ik i (unchecked-byte (bit-xor b 0x36)))
-          (aset-byte ok i (unchecked-byte (bit-xor b 0x5c)))))
-      [ik ok])))
+  {:pre [(<= (b/count k) 64)]}
+  (let [^bytes ik (-> (byte-array 64) (b/fill! 0x36))
+        ^bytes ok (-> (byte-array 64) (b/fill! 0x5c))]
+    (dotimes [i (alength k)]
+      (let [b (aget k i)]
+        (aset-byte ik i (unchecked-byte (bit-xor b 0x36)))
+        (aset-byte ok i (unchecked-byte (bit-xor b 0x5c)))))
+    [ik ok]))
 
 (defn ->recur-vd
   "Construct recur vmess digest state,
@@ -411,11 +410,16 @@
     (fn [rf]
       (fn
         ([] (rf))
-        ([result] (rf result))
-        ([result input]
-         (let [[b state] (advance-encrypt-state @vstate input)]
+        ([result]
+         (let [[b state] (advance-encrypt-state @vstate (b/empty))]
            (vreset! vstate state)
-           (rf result b)))))))
+           (rf result b))
+         (rf result))
+        ([result input]
+         (when-not (b/empty? input)
+           (let [[b state] (advance-encrypt-state @vstate input)]
+             (vreset! vstate state)
+             (rf result b))))))))
 
 ;;;; decrypt
 
@@ -465,7 +469,7 @@
             resp (-> (aes128-gcm-decrypt key iv eresp (b/empty))
                      (st/unpack-one st-resp))]
         (if-not (= verify (:verify resp))
-          (throw (ex-info "verify vmess resp failed" {}))
+          (throw (ex-info "invalid vmess resp verify code" {:reason :vmess/resp.verify}))
           (-> state
               (assoc :stage :wait-frame-len :buffer buffer)
               advance-decrypt-state))))))
@@ -504,9 +508,9 @@
         [b state]))))
 
 (defmethod advance-decrypt-state :closed [state]
-  (if-not (b/empty? (:buffer state))
-    (throw (ex-info "invalid data after vmess connection closed" {}))
-    [nil state]))
+  (if (b/empty? (:buffer state))
+    [nil state]
+    (throw (ex-info "invalid write after vmess connection shutdown" {:reason :vmess/conn.write-after-shutdown}))))
 
 (defn ->decrypt-xf
   "Construct vmess decrypt trans function for async chan."
@@ -518,7 +522,7 @@
         ([result]
          (if (= (:stage @vstate) :closed)
            (rf result)
-           (throw (ex-info "invalid shutdown before vmess connection closed" {:stage (:stage @vstate)}))))
+           (throw (ex-info "invalid close before vmess connection shutdown" {:reason :vmess/conn.close-before-shutdown :stage (:stage @vstate)}))))
         ([result input]
          (vswap! vstate update :buffer b/concat! input)
          (let [[b state] (advance-decrypt-state @vstate)]
@@ -534,24 +538,14 @@
   [(->decrypt-xf (->decrypt-state param))
    (->encrypt-xf (->encrypt-state param))])
 
-(defn ->server
-  [server param]
-  (let [[ixf oxf] (->xf-pair param)
-        ich (a/chan 1024 ixf)
-        och (a/chan 1024 oxf)]
-    (a/pipe (first server) ich)
-    (a/pipe och (second server))
-    [ich och]))
-
 (defrecord VmessClient [param]
   prx/HandShake
-  (hs-update [_ _b] (throw (ex-info "invalid update in client handshake" {})))
+  (hs-update [_ _b] (throw (ex-info "invalid update in vmess handshake" {:reason :vmess/handshake.update})))
   (hs-advance [this] [nil this])
-  (hs-info [_] {:type :ok :server-xf #(->server % param)}))
+  (hs-info [_] {:type :ok :server-xf-pair (->xf-pair param)}))
 
 (defmethod prx/->proxy-client :vmess [addr {:keys [id]}]
   (->VmessClient (->param id addr)))
-
 
 ;;; v2rayn
 
