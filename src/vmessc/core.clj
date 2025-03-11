@@ -1,6 +1,8 @@
 (ns vmessc.core
   (:require [clojure.string :as str]
             [clojure.edn :as edn]
+            [clojure.core.async :as a]
+            [clj-bytes.core :as b]
             [clj-proxy.core :as prx]
             clj-proxy.net
             clj-proxy.socks5
@@ -49,11 +51,23 @@
   [name]
   (slurp (with-conf-prefix name)))
 
+(def default-opts
+  {:tags-fallback :direct
+   :tags-source ["tags-dlc.edn" "tags-custom.edn"]
+   :test-http-server-addr ["www.google.com" 80]
+   :test-timeout-ms 10000
+   :server-port 10086
+   :server-log-types #{:info :error}})
+
+(defn opts-load
+  []
+  (merge default-opts (edn/read-string (conf-slurp "opts.edn"))))
+
 ;;; tags
 
 (defn tags-gen
   ([]
-   (tags-gen ["tags-dlc.edn" "tags-custom.edn"]))
+   (tags-gen (:tags-source (opts-load))))
   ([sources]
    (->> sources
         (mapcat #(edn/read-string (conf-slurp %)))
@@ -149,30 +163,92 @@
   []
   (edn/read-string (conf-slurp "sub.edn")))
 
-;;; server
+(defn int->str2
+  [i]
+  (let [s (str i)]
+    (if-not (= (count s) 1) s (str \space s))))
 
-(defn port-load
+(defn sub-list-1
+  [i {:keys [selected? name delay] :or {delay :timeout} :as edn}]
+  (println (int->str2 i) (if selected? "[x]" "[ ]") name delay (select-keys edn [:addr :net :tls?])))
+
+(defn sub-list
   []
-  (edn/read-string (conf-slurp "port.edn")))
+  (doseq [[i edn] (->> (sub-load) (map-indexed vector))]
+    (sub-list-1 i edn)))
+
+(defn sub-select
+  [idxs]
+  (->> (sub-load) (map-indexed #(assoc %2 :selected? (contains? idxs %1))) vec (conf-spit "sub.edn")))
+
+;;;; test
+
+(defn sub-test-connect
+  [{:keys [name uuid] :as edn} [host _ :as addr]]
+  (let [opts (vmess/vmess-edn->opts edn)
+        context {:log-fn prn :uuid uuid :addr addr}]
+    (a/go
+      (prx/log context {:level :debug :type :test-connect :via name})
+      (if-let [{[ich och] :server} (a/<! (prx/connect context opts))]
+        (if (a/>! och (b/of-str (str "GET / HTTP/1.1\r\nHost: " host "\r\n\r\n")))
+          (if (some? (a/<! ich))
+            (do
+              (prx/log context {:level :debug :type :test-connect-ok :via name})
+              :ok)
+            (prx/log context {:level :error :type :test-connect-error :reason :test-connect/read :via name}))
+          (prx/log context {:level :error :type :test-connect-error :reason :test-connect/write :via name}))
+        (prx/log context {:level :error :type :test-connect-error :reason :test-connect/connect :via name})))))
+
+(defn sub-test-1
+  [i edn addr timeout-ms]
+  (let [start-inst (now)]
+    (a/go
+      (let [connect-ch (sub-test-connect edn addr)
+            timeout-ch (a/timeout timeout-ms)]
+        (a/alt!
+          connect-ch ([_]
+                      (let [end-inst (now)
+                            delay (- (inst-ms end-inst) (inst-ms start-inst))]
+                        (sub-list-1 i (assoc edn :selected? true :delay delay))
+                        delay))
+          timeout-ch ([_]
+                      (sub-list-1 i (assoc edn :selected? false :delay :timeout))
+                      :timeout))))))
+
+(defn sub-test
+  []
+  (let [{:keys [test-http-server-addr test-timeout-ms]} (opts-load)
+        sub-atm (atom (sub-load))]
+    (doseq [[i edn] (->> @sub-atm (map-indexed vector))]
+      (a/go
+        (let [delay (or (a/<! (sub-test-1 i edn test-http-server-addr test-timeout-ms)) :timeout)]
+          (swap! sub-atm update i merge {:selected? (not= delay :timeout) :delay delay}))))
+    (Thread/sleep (+ test-timeout-ms 1000))
+    (let [s @sub-atm]
+      (*log-fn* {:type :test/finish})
+      (->> s (conf-spit "sub.edn")))))
+
+;;; server
 
 (defn server-context-load
   ([]
-   (let [port (port-load)
+   (let [opts (opts-load)
          tag-map (->> (tags-load) (into {}))
-         sub-opts (->> (sub-load) (filter :enable?) (mapv vmess/vmess-edn->opts))]
+         sub-opts (->> (sub-load) (filter :selected?) (mapv vmess/vmess-edn->opts))]
      (assert (seq sub-opts))
-     (server-context-load port tag-map sub-opts)))
-  ([port tag-map sub-opts]
-   {:log-fn *log-fn*
-    :net-server-opts {:type :tcp :port port}
-    :proxy-server-opts {:type :socks5}
-    :connect-opts {:type :tag-dispatch
-                   :name "main"
-                   :tag-map tag-map
-                   :default-tag :direct
-                   :sub-opts {:direct {:type :direct :name "direct"}
-                              :block {:type :block :name "block"}
-                              :proxy {:type :rand-dispatch :name "proxy" :sub-opts sub-opts}}}}))
+     (server-context-load opts tag-map sub-opts)))
+  ([opts tag-map sub-opts]
+   (let [{:keys [server-port tags-fallback]} opts]
+     {:log-fn *log-fn*
+      :net-server-opts {:type :tcp :port server-port}
+      :proxy-server-opts {:type :socks5}
+      :connect-opts {:type :tag-dispatch
+                     :name "main"
+                     :tag-map tag-map
+                     :default-tag tags-fallback
+                     :sub-opts {:direct {:type :direct :name "direct"}
+                                :block {:type :block :name "block"}
+                                :proxy {:type :rand-dispatch :name "proxy" :sub-opts sub-opts}}}})))
 
 (defn start-server
   ([]
