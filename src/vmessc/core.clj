@@ -52,11 +52,10 @@
   (slurp (with-conf-prefix name)))
 
 (def default-opts
-  {:tags-fallback :direct
-   :tags-source ["tags-dlc.edn" "tags-custom.edn"]
-   :test-server-addr ["www.google.com" 80]
+  {:test-server-addr ["www.google.com" 80]
    :test-timeout-ms 10000
    :server-port 10086
+   :server-default-tag :direct
    :server-log-types #{:info :error}})
 
 (defn opts-load
@@ -64,15 +63,6 @@
   (merge default-opts (edn/read-string (conf-slurp "opts.edn"))))
 
 ;;; tags
-
-(defn tags-gen
-  ([]
-   (tags-gen (:tags-source (opts-load))))
-  ([sources]
-   (->> sources
-        (mapcat #(edn/read-string (conf-slurp %)))
-        vec
-        (conf-spit "tags.edn"))))
 
 (defn tags-load
   []
@@ -136,7 +126,7 @@
         (dlc-tags-seq "cn" :direct)
         (dlc-tags-seq "geolocation-!cn" :proxy))
        vec
-       (conf-spit "tags-dlc.edn")))
+       (conf-spit "tags.edn")))
 
 ;;; sub
 
@@ -234,14 +224,14 @@
      (assert (seq sub-opts))
      (server-context-load opts tag-map sub-opts)))
   ([opts tag-map sub-opts]
-   (let [{:keys [server-port tags-fallback]} opts]
+   (let [{:keys [server-port server-default-tag]} opts]
      {:log-fn *log-fn*
       :net-server-opts {:type :tcp :port server-port}
       :proxy-server-opts {:type :socks5}
       :connect-opts {:type :tag-dispatch
                      :name "main"
                      :tag-map tag-map
-                     :default-tag tags-fallback
+                     :default-tag server-default-tag
                      :sub-opts {:direct {:type :direct :name "direct"}
                                 :block {:type :block :name "block"}
                                 :proxy {:type :rand-dispatch :name "proxy" :sub-opts sub-opts}}}})))
