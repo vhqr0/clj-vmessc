@@ -7,6 +7,7 @@
   (:import [java.util Date]
            [java.util.zip CRC32]
            [java.security MessageDigest]
+           [java.security.spec AlgorithmParameterSpec]
            [javax.crypto Cipher]
            [javax.crypto.spec SecretKeySpec GCMParameterSpec]
            [org.bouncycastle.crypto.digests SHAKEDigest]
@@ -30,9 +31,9 @@
 
 (defn crc32
   "Get crc32 check sum in int."
-  [b]
-  (let [c (doto (CRC32.)
-            (.update b))]
+  [^bytes b]
+  (let [^CRC32 c (CRC32.)]
+    (.update c b 0 (alength b))
     (.getValue c)))
 
 (defn fnv1a
@@ -83,11 +84,11 @@
 (defrecord SHA256VmessDigest [d]
   VmessDigest
   (vd-clone [_]
-    (->SHA256VmessDigest (.clone d)))
+    (->SHA256VmessDigest (.clone ^MessageDigest d)))
   (vd-update! [_ b]
-    (.update d b))
+    (.update ^MessageDigest d (bytes b)))
   (vd-digest! [_ b]
-    (.digest d b)))
+    (.digest ^MessageDigest d (bytes b))))
 
 (defrecord RecurVmessDigest [ivd ovd]
   VmessDigest
@@ -137,9 +138,9 @@
 
 (defn shake128-reader
   "Get reader function of shake128 random bytes generator."
-  [b]
-  (let [d (doto (SHAKEDigest. 128)
-            (.update b 0 (alength b)))]
+  [^bytes b]
+  (let [^SHAKEDigest d (SHAKEDigest. 128)]
+    (.update d b 0 (alength b))
     (fn [n]
       (let [b (byte-array n)]
         (.doOutput d b 0 n)
@@ -161,9 +162,9 @@
 (defn aes128-ecb-crypt
   "Encrypt or decrypt bytes with AES128 ECB."
   [key b mode]
-  (let [key (if-not (bytes? key) key (->aes-key key))
-        c (doto (Cipher/getInstance "AES/ECB/NoPadding")
-            (.init mode key))]
+  (let [^SecretKeySpec key (if-not (bytes? key) key (->aes-key key))
+        ^Cipher c (Cipher/getInstance "AES/ECB/NoPadding")]
+    (.init c (long mode) key)
     (.doFinal c b)))
 
 (defn aes128-ecb-encrypt [key b] (aes128-ecb-crypt key b Cipher/ENCRYPT_MODE))
@@ -172,11 +173,11 @@
 (defn aes128-gcm-crypt
   "Encryt or decrypt bytes with AES128 GCM."
   [key iv b aad mode]
-  (let [key (if-not (bytes? key) key (->aes-key key))
-        iv (GCMParameterSpec. 128 iv)
-        c (doto (Cipher/getInstance "AES/GCM/NoPadding")
-            (.init mode key iv)
-            (.updateAAD aad))]
+  (let [^SecretKeySpec key (if-not (bytes? key) key (->aes-key key))
+        ^AlgorithmParameterSpec iv (GCMParameterSpec. 128 iv)
+        ^Cipher c (Cipher/getInstance "AES/GCM/NoPadding")]
+    (.init c (long mode) key iv)
+    (.updateAAD c (bytes aad))
     (.doFinal c b)))
 
 (defn aes128-gcm-encrypt [key iv b aad] (aes128-gcm-crypt key iv b aad Cipher/ENCRYPT_MODE))
@@ -582,7 +583,7 @@
   (let [param (SSLParameters.)]
     (when (some? sni)
       (let [sni (if (string? sni) [sni] sni)
-            sni-array (->> sni (map #(SNIHostName. %)) (into-array SNIHostName))]
+            sni-array (->> sni (map #(SNIHostName. ^String %)) (into-array SNIHostName))]
         (.setServerNames param (java.util.Arrays/asList sni-array))))
     (when (some? alpn)
       (let [alpn (if (string? alpn) [alpn] alpn)
