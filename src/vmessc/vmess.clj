@@ -55,9 +55,9 @@
 
 (defn digest
   "Message digest."
-  [b algo]
-  (-> (MessageDigest/getInstance algo)
-      (.digest b)))
+  [^bytes b ^String algo]
+  (let [^MessageDigest d (MessageDigest/getInstance algo)]
+    (.digest d b)))
 
 (defn md5 [b] (digest b "MD5"))
 (defn sha256 [b] (digest b "SHA-256"))
@@ -81,14 +81,14 @@
   (vd-digest! [this b]
     "Do digest, impure."))
 
-(defrecord SHA256VmessDigest [d]
+(defrecord SHA256VmessDigest [^MessageDigest d]
   VmessDigest
   (vd-clone [_]
-    (->SHA256VmessDigest (.clone ^MessageDigest d)))
+    (->SHA256VmessDigest (.clone d)))
   (vd-update! [_ b]
-    (.update ^MessageDigest d (bytes b)))
+    (.update d (bytes b)))
   (vd-digest! [_ b]
-    (.digest ^MessageDigest d (bytes b))))
+    (.digest d (bytes b))))
 
 (defrecord RecurVmessDigest [ivd ovd]
   VmessDigest
@@ -141,7 +141,7 @@
   [^bytes b]
   (let [^SHAKEDigest d (SHAKEDigest. 128)]
     (.update d b 0 (alength b))
-    (fn [n]
+    (fn [^long n]
       (let [b (byte-array n)]
         (.doOutput d b 0 n)
         b))))
@@ -161,10 +161,10 @@
 
 (defn aes128-ecb-crypt
   "Encrypt or decrypt bytes with AES128 ECB."
-  [key b mode]
+  [key ^bytes b ^long mode]
   (let [^SecretKeySpec key (if-not (bytes? key) key (->aes-key key))
         ^Cipher c (Cipher/getInstance "AES/ECB/NoPadding")]
-    (.init c (long mode) key)
+    (.init c mode key)
     (.doFinal c b)))
 
 (defn aes128-ecb-encrypt [key b] (aes128-ecb-crypt key b Cipher/ENCRYPT_MODE))
@@ -178,7 +178,7 @@
         ^Cipher c (Cipher/getInstance "AES/GCM/NoPadding")]
     (.init c (long mode) key iv)
     (.updateAAD c (bytes aad))
-    (.doFinal c b)))
+    (.doFinal c (bytes b))))
 
 (defn aes128-gcm-encrypt [key iv b aad] (aes128-gcm-crypt key iv b aad Cipher/ENCRYPT_MODE))
 (defn aes128-gcm-decrypt [key iv b aad] (aes128-gcm-crypt key iv b aad Cipher/DECRYPT_MODE))
@@ -596,8 +596,8 @@
   [opts]
   (let [^SSLParameters param (->tls-param opts)
         ^SSLContext context (SSLContext/getDefault)
-        ^SSLEngine engine (doto (.createSSLEngine context)
-                            (.setSSLParameters param))]
+        ^SSLEngine engine (.createSSLEngine context)]
+    (.setSSLParameters engine param)
     (SslHandler. engine)))
 
 (defn vmess-edn->net-opts
