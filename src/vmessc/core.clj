@@ -278,6 +278,3 @@
   [[log-ch server]]
   (a/close! log-ch)
   (.close server))
-
-(defn -main [& _]
-  (start-server))
