@@ -273,3 +273,11 @@
          log-ch (a/chan 1024)]
      (start-server-log log-ch log-opts)
      [log-ch (a/<!! (prx/start-server (assoc context :log-fn #(a/put! log-ch %))))])))
+
+(defn close-server
+  [[log-ch server]]
+  (a/close! log-ch)
+  (.close server))
+
+(defn -main [& _]
+  (start-server))
