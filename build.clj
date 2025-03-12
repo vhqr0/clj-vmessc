@@ -1,7 +1,7 @@
 (ns build
   (:require [clojure.tools.build.api :as b]))
 
-(def lib 'clj-vmessc)
+(def lib 'io.github.vhqr0/clj-vmessc)
 (def version (b/git-count-revs nil))
 (def class-dir "target/classes")
 (def jar-file (format "target/%s-%s.jar" (name lib) version))
