@@ -7,7 +7,8 @@
             clj-proxy.net
             clj-proxy.socks5
             [vmessc.vmess :as vmess])
-  (:import [java.util Date]
+  (:import [java.io Closeable]
+           [java.util Date]
            [java.text SimpleDateFormat]))
 
 ;;; utils
@@ -19,7 +20,7 @@
   []
   (Date.))
 
-(def ^:dynamic *date-formatter*
+(def ^:dynamic ^SimpleDateFormat *date-formatter*
   "Inst formatter."
   (SimpleDateFormat. "yyyy-MM-dd-HH:mm:ss"))
 
@@ -27,7 +28,7 @@
   "Format inst."
   ([]
    (inst-fmt (now)))
-  ([i]
+  ([^Date i]
    (-> *date-formatter* (.format i))))
 
 (defn with-conf-prefix
@@ -209,7 +210,7 @@
       (a/go
         (let [delay (or (a/<! (sub-test-1 edn test-server-addr test-timeout-ms)) :timeout)]
           (swap! sub-atom update i merge {:selected? (not= delay :timeout) :delay delay}))))
-    (Thread/sleep (+ test-timeout-ms 1000))
+    (Thread/sleep ^long (+ test-timeout-ms 1000))
     (let [s @sub-atom]
       (*log-fn* {:type :test/finish})
       (->> s (conf-spit "sub.edn")))))
@@ -277,4 +278,4 @@
 (defn close-server
   [[log-ch server]]
   (a/close! log-ch)
-  (.close server))
+  (.close ^Closeable server))
