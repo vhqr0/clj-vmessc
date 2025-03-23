@@ -413,8 +413,7 @@
         ([result]
          (let [[b state] (advance-encrypt-state @vstate (b/empty))]
            (vreset! vstate state)
-           (rf result b))
-         (rf result))
+           (-> result (rf b) unreduced rf)))
         ([result input]
          (when-not (b/empty? input)
            (let [[b state] (advance-encrypt-state @vstate input)]
